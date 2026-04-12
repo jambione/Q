@@ -1,0 +1,35 @@
+name: Q — Validate KB
+
+on:
+  push:
+    paths:
+      - "knowledge_base/**"
+      - ".github/agents/*.agent.md"
+  pull_request:
+    paths:
+      - "knowledge_base/**"
+      - ".github/agents/*.agent.md"
+
+jobs:
+  q-validate:
+    name: Q Knowledge Base Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate Q knowledge base structure
+        run: python scripts/q-validate.py
+
+      - name: Validation summary
+        if: always()
+        run: |
+          echo "## Q KB Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          python scripts/q-validate.py >> $GITHUB_STEP_SUMMARY 2>&1 || true

@@ -1,0 +1,25 @@
+{
+  "mode": "normal",
+  "sensitivity": "normal",
+  "model_fast": "claude-haiku-4-5-20251001",
+  "model_normal": "claude-sonnet-4-6",
+  "watched_extensions": [".py", ".ts", ".js", ".go", ".java", ".cs", ".rb", ".php", ".swift", ".kt"],
+  "exclude_patterns": [
+    "**/node_modules/**",
+    "**/.git/**",
+    "**/dist/**",
+    "**/out/**",
+    "**/build/**",
+    "**/__pycache__/**",
+    "**/*.min.js",
+    "**/*.min.css",
+    "**/vendor/**"
+  ],
+  "rate_limit_per_minute": 10,
+  "p3_silent": true,
+  "max_diff_lines": 300,
+  "kb_path": "knowledge_base",
+  "verdicts_path": "knowledge_base/verdicts/index.md",
+  "learned_path": "knowledge_base/learned/q-learned.md",
+  "anthropic_api_key_env": "ANTHROPIC_API_KEY"
+}

@@ -1,0 +1,25 @@
+{
+  "name": "q-conscience",
+  "displayName": "Q — Code Conscience",
+  "description": "Always-on code conscience. Watches file saves, judges changes using GitHub Copilot, learns from your feedback.",
+  "version": "0.1.0",
+  "publisher": "q-conscience",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "q.reviewFile",
+        "title": "Q: Review Current File"
+      },
+      {
+        "command": "q.openLearned",
+        "title": "Q: Open Learned Exceptions"
+      }
+    ]
+  }
+}

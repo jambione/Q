@@ -1,0 +1,41 @@
+name: Q — Judge
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  q-judge:
+    name: Q Conscience Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # Need HEAD~1 for diff
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run Q judgment on changed files
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/q-judge.py --diff
+
+      - name: Upload verdict to job summary
+        if: always()
+        run: |
+          echo "## Q Conscience Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f knowledge_base/verdicts/index.md ]; then
+            echo "### Latest Verdicts" >> $GITHUB_STEP_SUMMARY
+            # Extract last 10 rows from the verdict table
+            tail -n 10 knowledge_base/verdicts/index.md >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "_Run \`python scripts/q-judge.py --diff\` locally to reproduce._" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python scripts/q-judge.py --file \"${TOOL_INPUT_FILE_PATH}\""
+          }
+        ]
+      }
+    ]
+  }
+}
