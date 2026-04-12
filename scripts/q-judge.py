@@ -21,7 +21,7 @@ from pathlib import Path
 
 # Add scripts/ to path for config import
 sys.path.insert(0, str(Path(__file__).parent))
-from q_config import load_config, get_api_key, get_model, should_watch_file, sensitivity_allows
+from q_config import load_config, get_api_key, get_model, should_watch_file, sensitivity_allows, is_ci_gate, load_exceptions
 
 
 # ──────────────────────────────────────────────────────────────
@@ -74,15 +74,8 @@ def get_relevant_domains(diff_text: str, kb_path: str) -> dict[str, str]:
 
 
 def load_learned(config: dict) -> str:
-    """Load q-learned.md content. Returns empty string if file is empty/placeholder."""
-    learned_path = Path(config["learned_path"])
-    if not learned_path.exists():
-        return ""
-    content = learned_path.read_text(encoding="utf-8")
-    # If only placeholder text, return empty so we don't waste tokens
-    if "No entries yet" in content and "No patterns yet" in content:
-        return ""
-    return content
+    """Load combined team + personal exceptions. Returns empty string if no real entries."""
+    return load_exceptions(config)
 
 
 def build_system_prompt() -> str:
@@ -379,17 +372,18 @@ def main():
         # Check sensitivity filter
         if verdict.get("flagged"):
             severity = verdict.get("severity", "P2")
+            append_verdict(config, verdict_id, file_path, verdict)
+
             if not sensitivity_allows(config, severity):
-                # Log silently to verdicts index but don't print
-                append_verdict(config, verdict_id, file_path, verdict)
+                # Below sensitivity threshold — logged silently, no terminal output
                 continue
 
-            any_flagged = True
-            append_verdict(config, verdict_id, file_path, verdict)
             print(format_verdict_output(file_path, verdict, verdict_id))
+
+            if is_ci_gate(config, severity):
+                any_flagged = True
         else:
-            # Clean — only print in verbose mode (not default)
-            pass
+            pass  # Clean — silent
 
     sys.exit(1 if any_flagged else 0)
 

@@ -18,8 +18,17 @@
   "rate_limit_per_minute": 10,
   "p3_silent": true,
   "max_diff_lines": 300,
+
   "kb_path": "knowledge_base",
+  "domains_path": "knowledge_base/domains",
   "verdicts_path": "knowledge_base/verdicts/index.md",
-  "learned_path": "knowledge_base/learned/q-learned.md",
+
+  "team_exceptions_path": "knowledge_base/team/exceptions/approved.md",
+  "personal_kb_path": "knowledge_base/personal/q-learned.md",
+
+  "team_mode": true,
+  "ci_gate_severities": ["P0", "P1"],
+  "advisory_only": false,
+
   "anthropic_api_key_env": "ANTHROPIC_API_KEY"
 }

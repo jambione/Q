@@ -4,8 +4,10 @@ q-validate.py — Q Knowledge Base validator.
 Checks:
   - All domain docs are listed in knowledge_base/index.md
   - Each domain doc has required headers (Owner, Review Cadence, Last Updated)
-  - knowledge_base/learned/q-learned.md exists and has required sections
+  - knowledge_base/team/exceptions/approved.md exists and has required sections
+  - knowledge_base/personal/q-learned.md is documented in index.md (contents gitignored)
   - knowledge_base/verdicts/index.md exists and is well-formed
+  - All rule IDs follow expected prefix format
 
 Usage:
   python scripts/q-validate.py
@@ -24,10 +26,14 @@ from q_config import load_config
 
 REQUIRED_DOMAIN_HEADERS = ["**Owner**", "**Review Cadence**", "**Last Updated**"]
 
-REQUIRED_LEARNED_SECTIONS = [
+REQUIRED_PERSONAL_KB_SECTIONS = [
     "## Confirmed Wrong (Q-ACCEPT)",
     "## Accepted Exceptions (Q-OVERRIDE)",
-    "## Patterns Detected (q-memory Synthesis)",
+    "## Patterns Detected",
+]
+
+REQUIRED_TEAM_EXCEPTIONS_SECTIONS = [
+    "## Accepted Exceptions",
 ]
 
 REQUIRED_VERDICTS_HEADERS = [
@@ -77,19 +83,44 @@ def check_domain_doc_headers(config: dict) -> list[str]:
     return errors
 
 
-def check_learned_doc(config: dict) -> list[str]:
-    """Verify q-learned.md exists and has required sections."""
+def check_team_exceptions(config: dict) -> list[str]:
+    """Verify team exceptions file exists and has required sections."""
     errors = []
-    learned_path = Path(config["learned_path"])
+    team_path = Path(config["team_exceptions_path"])
 
-    if not learned_path.exists():
-        return [f"MISSING: q-learned.md not found at {config['learned_path']}"]
+    if not team_path.exists():
+        return [f"MISSING: team exceptions file not found at {config['team_exceptions_path']}"]
 
-    content = learned_path.read_text(encoding="utf-8")
+    content = team_path.read_text(encoding="utf-8")
 
-    for section in REQUIRED_LEARNED_SECTIONS:
+    for section in REQUIRED_TEAM_EXCEPTIONS_SECTIONS:
         if section not in content:
-            errors.append(f"MISSING SECTION: q-learned.md is missing '{section}'")
+            errors.append(f"MISSING SECTION: {team_path.name} is missing '{section}'")
+
+    # Check it has required metadata headers
+    for header in ["**Owner**", "**Approval Process**"]:
+        if header not in content:
+            errors.append(f"MISSING HEADER: {team_path.name} is missing '{header}'")
+
+    return errors
+
+
+def check_personal_kb_documented(config: dict) -> list[str]:
+    """Verify knowledge_base/index.md documents the personal KB (even though contents are gitignored)."""
+    errors = []
+    kb_path = Path(config["kb_path"])
+    index_path = kb_path / "index.md"
+
+    if not index_path.exists():
+        return []  # Already caught by check_domain_docs_indexed
+
+    index_content = index_path.read_text(encoding="utf-8")
+
+    if "personal" not in index_content.lower():
+        errors.append(
+            "NOT DOCUMENTED: knowledge_base/index.md does not reference personal/ KB tier — "
+            "add a Personal Exception Documents section"
+        )
 
     return errors
 
@@ -154,7 +185,8 @@ def main() -> int:
     checks = [
         ("Domain docs indexed", check_domain_docs_indexed),
         ("Domain doc headers", check_domain_doc_headers),
-        ("Learned doc structure", check_learned_doc),
+        ("Team exceptions structure", check_team_exceptions),
+        ("Personal KB documented in index", check_personal_kb_documented),
         ("Verdicts doc structure", check_verdicts_doc),
         ("Rule ID format", check_rule_id_format),
     ]

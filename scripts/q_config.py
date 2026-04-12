@@ -1,5 +1,5 @@
 """
-q-config.py — Shared config loader for all Q scripts.
+q_config.py — Shared config loader for all Q scripts.
 Pure stdlib. No external dependencies.
 """
 
@@ -17,12 +17,11 @@ def find_repo_root() -> Path:
         if (current / "q-config.json").exists():
             return current
         current = current.parent
-    # Fallback: assume repo root is two levels up from scripts/
     return Path(__file__).resolve().parent.parent
 
 
 def load_config() -> dict:
-    """Load q-config.json from repo root. Returns config dict."""
+    """Load q-config.json from repo root. Returns config dict with all paths resolved."""
     root = find_repo_root()
     config_path = root / "q-config.json"
 
@@ -33,11 +32,23 @@ def load_config() -> dict:
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    # Resolve relative paths to absolute
+    # Resolve all paths to absolute
     config["_root"] = str(root)
     config["kb_path"] = str(root / config.get("kb_path", "knowledge_base"))
+    config["domains_path"] = str(root / config.get("domains_path", "knowledge_base/domains"))
     config["verdicts_path"] = str(root / config.get("verdicts_path", "knowledge_base/verdicts/index.md"))
-    config["learned_path"] = str(root / config.get("learned_path", "knowledge_base/learned/q-learned.md"))
+
+    # Two-tier exception paths
+    config["team_exceptions_path"] = str(
+        root / config.get("team_exceptions_path", "knowledge_base/team/exceptions/approved.md")
+    )
+    config["personal_kb_path"] = str(
+        root / config.get("personal_kb_path", "knowledge_base/personal/q-learned.md")
+    )
+
+    # Legacy compat: if old learned_path is set, prefer personal_kb_path
+    if "learned_path" in config and "personal_kb_path" not in config:
+        config["personal_kb_path"] = str(root / config["learned_path"])
 
     return config
 
@@ -65,14 +76,11 @@ def should_watch_file(config: dict, file_path: str) -> bool:
 
     path = Path(file_path)
 
-    # Check extension
     watched = config.get("watched_extensions", [])
     if watched and path.suffix.lower() not in watched:
         return False
 
-    # Check exclude patterns
     for pattern in config.get("exclude_patterns", []):
-        # Normalize path for pattern matching
         normalized = file_path.replace("\\", "/")
         if fnmatch.fnmatch(normalized, pattern):
             return False
@@ -95,7 +103,6 @@ def sensitivity_allows(config: dict, severity: str) -> bool:
 
     threshold = thresholds.get(sensitivity, "P2")
 
-    # P3 always silent if p3_silent is set
     if severity == "P3" and p3_silent:
         return False
 
@@ -103,3 +110,37 @@ def sensitivity_allows(config: dict, severity: str) -> bool:
     severity_idx = order.index(severity) if severity in order else 99
 
     return severity_idx <= threshold_idx
+
+
+def is_ci_gate(config: dict, severity: str) -> bool:
+    """Return True if this severity should fail CI (return exit code 1)."""
+    if config.get("advisory_only", False):
+        return False
+    gate_severities = config.get("ci_gate_severities", ["P0", "P1"])
+    return severity in gate_severities
+
+
+def load_exceptions(config: dict) -> str:
+    """Load combined exception context: team approved + personal overrides.
+    Returns combined markdown string for injection into judge prompt.
+    """
+    sections = []
+
+    team_path = Path(config["team_exceptions_path"])
+    if team_path.exists():
+        team_content = team_path.read_text(encoding="utf-8")
+        if "No team exceptions yet" not in team_content and "## Accepted Exceptions" not in team_content:
+            pass  # placeholder only
+        else:
+            # Only inject if there are real entries
+            if "###" in team_content:
+                sections.append("## Team-Approved Exceptions (apply to all developers)\n" + team_content)
+
+    personal_path = Path(config["personal_kb_path"])
+    if personal_path.exists():
+        personal_content = personal_path.read_text(encoding="utf-8")
+        # Skip if only placeholder text
+        if "No entries yet" not in personal_content or "###" in personal_content:
+            sections.append("## Your Personal Exceptions\n" + personal_content)
+
+    return "\n\n---\n\n".join(sections) if sections else ""

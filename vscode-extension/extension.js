@@ -121,16 +121,37 @@ function getFileDiff(filePath, workspaceRoot) {
 }
 
 function loadLearned(config, workspaceRoot) {
+    const sections = [];
+
+    // Team-approved exceptions (committed, shared)
     try {
-        const learnedPath = path.join(workspaceRoot, config.learned_path || 'knowledge_base/learned/q-learned.md');
-        if (!fs.existsSync(learnedPath)) return '';
-        const content = fs.readFileSync(learnedPath, 'utf8');
-        // Skip if only placeholder text
-        if (content.includes('No entries yet') && content.includes('No patterns yet')) return '';
-        return content;
-    } catch {
-        return '';
-    }
+        const teamPath = path.join(
+            workspaceRoot,
+            config.team_exceptions_path || 'knowledge_base/team/exceptions/approved.md'
+        );
+        if (fs.existsSync(teamPath)) {
+            const content = fs.readFileSync(teamPath, 'utf8');
+            if (content.includes('###')) {
+                sections.push('## Team-Approved Exceptions (apply to all developers)\n' + content);
+            }
+        }
+    } catch { /* ignore */ }
+
+    // Personal overrides (gitignored, per-developer)
+    try {
+        const personalPath = path.join(
+            workspaceRoot,
+            config.personal_kb_path || 'knowledge_base/personal/q-learned.md'
+        );
+        if (fs.existsSync(personalPath)) {
+            const content = fs.readFileSync(personalPath, 'utf8');
+            if (!content.includes('No entries yet') || content.includes('###')) {
+                sections.push('## Your Personal Exceptions\n' + content);
+            }
+        }
+    } catch { /* ignore */ }
+
+    return sections.join('\n\n---\n\n');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -215,15 +236,32 @@ async function showVerdict(verdict, filePath, config, workspaceRoot) {
             vscode.window.setStatusBarMessage(`Q: Very well. I shall note your... creative justification.`, 5000);
         }
     } else if (choice === 'Enlighten Q') {
-        const learnedPath = path.join(workspaceRoot, config.learned_path || 'knowledge_base/learned/q-learned.md');
-        const uri = vscode.Uri.file(learnedPath);
+        const personalPath = path.join(
+            workspaceRoot,
+            config.personal_kb_path || 'knowledge_base/personal/q-learned.md'
+        );
+        const uri = vscode.Uri.file(personalPath);
         await vscode.window.showTextDocument(uri);
     }
 }
 
 function recordLearning(workspaceRoot, config, verdictId, response, reason, ruleId, filePath, message) {
-    const learnedPath = path.join(workspaceRoot, config.learned_path || 'knowledge_base/learned/q-learned.md');
-    if (!fs.existsSync(learnedPath)) return;
+    // Always write to personal KB — team exceptions require a PR
+    const learnedPath = path.join(
+        workspaceRoot,
+        config.personal_kb_path || 'knowledge_base/personal/q-learned.md'
+    );
+
+    // Auto-create personal KB file if it doesn't exist yet
+    if (!fs.existsSync(learnedPath)) {
+        const dir = path.dirname(learnedPath);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        const today = new Date().toISOString().slice(0, 10);
+        fs.writeFileSync(learnedPath,
+            `# Q Personal Learned Exceptions\n\n**Owner**: you (gitignored — never committed)\n**Last Updated**: ${today}\n\n---\n\n## Confirmed Wrong (Q-ACCEPT)\n\n_No entries yet._\n\n---\n\n## Accepted Exceptions (Q-OVERRIDE)\n\n_No entries yet._\n\n---\n\n## Patterns Detected\n\n_No patterns yet._\n`,
+            'utf8'
+        );
+    }
 
     const date = new Date().toISOString().slice(0, 10);
     const fileName = path.basename(filePath);
@@ -406,15 +444,36 @@ function activate(context) {
         })
     );
 
-    // Open learned exceptions command
+    // Open personal learned exceptions command
     context.subscriptions.push(
         vscode.commands.registerCommand('q.openLearned', async () => {
             const workspaceRoot = getWorkspaceRoot();
             if (!workspaceRoot) return;
             const config = loadQConfig(workspaceRoot) || DEFAULT_CONFIG;
-            const learnedPath = path.join(workspaceRoot, config.learned_path || 'knowledge_base/learned/q-learned.md');
-            if (fs.existsSync(learnedPath)) {
-                await vscode.window.showTextDocument(vscode.Uri.file(learnedPath));
+            const personalPath = path.join(
+                workspaceRoot,
+                config.personal_kb_path || 'knowledge_base/personal/q-learned.md'
+            );
+            if (fs.existsSync(personalPath)) {
+                await vscode.window.showTextDocument(vscode.Uri.file(personalPath));
+            } else {
+                vscode.window.showInformationMessage('Q: No personal exceptions yet. Make some mistakes first.');
+            }
+        })
+    );
+
+    // Open team exceptions command
+    context.subscriptions.push(
+        vscode.commands.registerCommand('q.openTeamExceptions', async () => {
+            const workspaceRoot = getWorkspaceRoot();
+            if (!workspaceRoot) return;
+            const config = loadQConfig(workspaceRoot) || DEFAULT_CONFIG;
+            const teamPath = path.join(
+                workspaceRoot,
+                config.team_exceptions_path || 'knowledge_base/team/exceptions/approved.md'
+            );
+            if (fs.existsSync(teamPath)) {
+                await vscode.window.showTextDocument(vscode.Uri.file(teamPath));
             }
         })
     );

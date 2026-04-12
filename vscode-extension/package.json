@@ -18,7 +18,11 @@
       },
       {
         "command": "q.openLearned",
-        "title": "Q: Open Learned Exceptions"
+        "title": "Q: Open My Exceptions"
+      },
+      {
+        "command": "q.openTeamExceptions",
+        "title": "Q: Open Team Exceptions"
       }
     ]
   }

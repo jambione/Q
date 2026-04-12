@@ -14,7 +14,12 @@ Q is a conscience, not a team. One voice. Two modes. One KB.
 | **Copilot Chat** | User invokes Q manually | q.agent.md | 3–5s | q-memory via Edit tool |
 | **Silent Hook** | Claude Code PostToolUse fires | q-judge.py script | ~2s | q-learn.py script |
 
-Both modes share `knowledge_base/learned/q-learned.md` and `knowledge_base/verdicts/index.md`.
+Both modes share a **two-tier exception system** and `knowledge_base/verdicts/index.md`:
+
+| File | Tier | Committed? | Who writes |
+|------|------|-----------|-----------|
+| `knowledge_base/team/exceptions/approved.md` | Team | Yes (PR required) | `q-learn.py --team` |
+| `knowledge_base/personal/q-learned.md` | Personal | No (gitignored) | `q-learn.py` (default) |
 
 ---
 
@@ -24,7 +29,8 @@ Both modes share `knowledge_base/learned/q-learned.md` and `knowledge_base/verdi
 STEP 1: OBSERVE
   User: "Q, review auth.py" or pastes a diff
   Q emits: [Q-OBSERVING: <file>]
-  Q reads: knowledge_base/learned/q-learned.md  ← only dynamic file read
+  Q reads: knowledge_base/team/exceptions/approved.md  ← team-wide patterns to skip
+  Q reads: knowledge_base/personal/q-learned.md        ← your personal dismissals
 
 STEP 2: JUDGE
   Q applies embedded rules (in q.agent.md) against the change
@@ -72,7 +78,8 @@ STEP 2: DIFF
 STEP 3: KB LOAD
   Keyword-match diff against DOMAIN_KEYWORDS table
   Load matching domain docs from knowledge_base/domains/
-  Load knowledge_base/learned/q-learned.md
+  Load knowledge_base/team/exceptions/approved.md
+  Load knowledge_base/personal/q-learned.md (if exists)
 
 STEP 4: JUDGE
   Call Claude API (urllib.request, no SDK)
@@ -93,13 +100,21 @@ STEP 5: OUTPUT
     Exit 0 silently (no terminal output)
 
 STEP 6: USER RESPONSE (optional)
+  # Personal exception (default — gitignored, no review):
   python scripts/q-learn.py \
     --verdict-id 20260412-143022-auth-config-py \
     --response override \
     --reason "test fixture, not a real credential"
     
-  q-learn.py appends to q-learned.md
-  q-learn.py prints: [Q-LEARNED: q-learned.md | Accepted exception: ...]
+  # Team exception (committed, requires PR review):
+  python scripts/q-learn.py \
+    --verdict-id 20260412-143022-auth-config-py \
+    --response override \
+    --reason "Django select_related is not an N+1" \
+    --team
+    
+  q-learn.py appends to the appropriate KB tier
+  q-learn.py prints: [Q-LEARNED: <tier>/q-learned.md | Accepted exception: ...]
   q-learn.py prints: [Q-VERDICT-CLOSED: <verdict-id>]
 ```
 
@@ -131,10 +146,14 @@ P3 is always silent. P0 is always loud. P1/P2 behavior controlled by `q-config.j
 Same enforcement discipline as team-building. Every verdict the user responds to must close the learning loop before the verdict is considered final.
 
 ```
-User responds → Q emits [Q-SYNTHESIZE: <id>] → q-memory updates q-learned.md
+User responds → Q emits [Q-SYNTHESIZE: <id>]
+             → q-memory asks: personal exception or team exception?
+             → q-memory writes to: personal/q-learned.md (default) or team/exceptions/approved.md (--team)
              → q-memory emits [Q-LEARNED: <doc> | <specific content>]
              → q-memory emits [Q-VERDICT-CLOSED: <id>]
 ```
+
+**Team exception note**: If writing to `team/exceptions/approved.md`, q-memory adds a reminder to open a PR. Team exceptions are committed and affect all developers — they require review before merge.
 
 **Quality standard for [Q-LEARNED] signal**:
 
@@ -179,7 +198,59 @@ The description must name the rule, the pattern, and the source.
 | `scripts/q-judge.py --file <path>` | Silent hook | Claude Code PostToolUse hook |
 | `scripts/q-judge.py --diff` | CI | GitHub Actions q-judge.yml |
 | `scripts/q-learn.py` | Both | User manually, or q-learn.yml via PR comment signal |
+| `scripts/q-learn.py --team` | Both | User manually (opens PR to team exceptions) |
 | `scripts/q-validate.py` | CI | GitHub Actions q-validate.yml |
+| `scripts/q-report.py` | Digest | GitHub Actions q-report.yml (Mondays) or manual |
+
+---
+
+## Team Mode Protocol
+
+When `team_mode: true` in `q-config.json`, Q is deployed across a team. Additional behaviors apply:
+
+### Advisory-First Deployment
+
+New teams should start with `advisory_only: true` — Q runs, verdicts log to `verdicts/index.md`, but CI never fails. This gives developers 1–2 weeks to observe Q's behavior, tune sensitivity, and add exceptions before enforcement goes live.
+
+```json
+{ "advisory_only": true, "sensitivity": "quiet" }
+```
+
+After the trial period, flip to enforcement:
+```json
+{ "advisory_only": false, "sensitivity": "normal" }
+```
+
+### CI Gate Severities
+
+`ci_gate_severities` controls which verdict levels fail CI (exit code 1). Default: `["P0", "P1"]`.
+
+To start with only P0 blocking:
+```json
+{ "ci_gate_severities": ["P0"] }
+```
+
+### Two-Tier Learning
+
+| Action | Command | Scope |
+|--------|---------|-------|
+| Dismiss for yourself | `q-learn.py --response override --reason "..."` | Personal, gitignored |
+| Dismiss for the team | `q-learn.py --response override --reason "..." --team` | Committed, PR required |
+| Confirm a true positive | `q-learn.py --response accept` | Personal record |
+
+### Weekly Digest
+
+Q generates a weekly team digest every Monday at 09:00 UTC via `.github/workflows/q-report.yml`. The digest shows:
+- Total verdicts and severity breakdown
+- Top rules fired
+- Most-flagged files
+- P0/P1 detail (action required)
+
+Run manually: `python scripts/q-report.py --days 7`
+
+### Rule Governance
+
+Team rules are changed via PR. See `docs/rule-governance.md` for the full process. Use `.github/PULL_REQUEST_TEMPLATE/rule-proposal.md` when opening rule change PRs.
 
 ---
 

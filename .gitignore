@@ -1,0 +1,17 @@
+# Q — Personal KB (per-developer, never committed)
+# Each developer has their own local overrides and learned exceptions.
+# These never go into the shared repo — they are yours alone.
+knowledge_base/personal/
+
+# Python cache
+scripts/__pycache__/
+*.pyc
+*.pyo
+
+# VS Code extension development artifacts
+vscode-extension/.vscode/
+vscode-extension/node_modules/
+
+# OS
+.DS_Store
+Thumbs.db

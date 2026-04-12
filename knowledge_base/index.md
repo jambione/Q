@@ -18,11 +18,19 @@
 | [performance.md](domains/performance.md) | N+1 queries, unbounded growth, blocking async | P1–P2 | 2026-04-12 | q |
 | [error-handling.md](domains/error-handling.md) | Silent catches, base exceptions, resource leaks | P1–P3 | 2026-04-12 | q |
 
-## Learned Documents
+## Team Exception Documents
 
 | Document | Description | Last Updated | Owner |
 |----------|-------------|-------------|-------|
-| [q-learned.md](learned/q-learned.md) | User-confirmed exceptions and overrides (grows over time) | 2026-04-12 | q-memory |
+| [team/exceptions/approved.md](team/exceptions/approved.md) | Team-approved exceptions (requires PR to modify) | 2026-04-12 | team |
+
+## Personal Exception Documents
+
+> `knowledge_base/personal/` is gitignored. Each developer has their own copy.
+
+| Document | Description | Owner |
+|----------|-------------|-------|
+| `personal/q-learned.md` | Per-developer overrides — local only, never committed | you |
 
 ## Verdict Registry
 
