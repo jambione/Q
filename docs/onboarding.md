@@ -8,10 +8,10 @@
 
 Q runs in two modes simultaneously:
 
-| Mode | How it fires | Output |
-|------|-------------|--------|
-| **Silent Hook** | After every file save (Claude Code) | Terminal verdict — no interruption unless P0/P1 |
-| **Copilot Chat** | When you ask Q directly | Conversational verdict with Q's... *theatrical* commentary |
+| Mode             | How it fires                        | Output                                                     |
+| ---------------- | ----------------------------------- | ---------------------------------------------------------- |
+| **Silent Hook**  | After every file save (Claude Code) | Terminal verdict — no interruption unless P0/P1            |
+| **Copilot Chat** | When you ask Q directly             | Conversational verdict with Q's... _theatrical_ commentary |
 
 Q flags violations against a shared rulebook. When Q is wrong, you tell it — and it remembers. Your dismissals stay local (gitignored); team-wide exceptions require a PR.
 
@@ -19,11 +19,18 @@ Q flags violations against a shared rulebook. When Q is wrong, you tell it — a
 
 ## Prerequisites
 
+| Dependency     | Version             | Required for                                                             |
+| -------------- | ------------------- | ------------------------------------------------------------------------ |
+| Python         | 3.10+               | All scripts (`q-judge.py`, `q-learn.py`, `q-report.py`, `q-validate.py`) |
+| Git            | any                 | Diff detection — Q skips untracked files                                 |
+| VS Code        | 1.90+               | Extension mode                                                           |
+| GitHub Copilot | any (Chat required) | Extension mode — uses `vscode.lm` API                                    |
+
 - Git repository with `q-config.json` in root (already present in this repo)
 - One of:
-  - **Claude Code** (for silent hook mode) — [claude.ai/code](https://claude.ai/code)
-  - **GitHub Copilot** in VS Code (for extension mode)
-  - **Both** (recommended)
+    - **Claude Code** (for silent hook mode) — [claude.ai/code](https://claude.ai/code)
+    - **GitHub Copilot** in VS Code (for extension mode) — requires **GitHub Copilot Chat**, not just autocomplete
+    - **Both** (recommended)
 
 ---
 
@@ -32,12 +39,14 @@ Q flags violations against a shared rulebook. When Q is wrong, you tell it — a
 Q hooks into Claude Code's `PostToolUse` event. Every `Edit` or `Write` tool call automatically triggers a judgment.
 
 **Step 1** — Set your Anthropic API key:
+
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 # Add to ~/.bashrc or ~/.zshrc to persist
 ```
 
 **Step 2** — The hook is already wired in `.claude/settings.json`. Verify it's there:
+
 ```bash
 cat .claude/settings.json
 ```
@@ -45,6 +54,7 @@ cat .claude/settings.json
 That's it. Open Claude Code, edit a file, and watch the terminal.
 
 **Verify it works:**
+
 ```bash
 python scripts/q-judge.py --file scripts/q-judge.py
 ```
@@ -56,6 +66,7 @@ python scripts/q-judge.py --file scripts/q-judge.py
 Q runs as a plain JS extension — no build step, no npm install.
 
 **Step 1** — Install via junction (no admin required on Windows):
+
 ```bash
 python scripts/install-extension.py
 ```
@@ -75,11 +86,13 @@ The status bar shows `Q: ◦` when idle. Save any watched file to trigger a chec
 When Q flags something you've already reviewed and accepted, dismiss it:
 
 **In Copilot Chat:**
+
 ```
 [Q-OVERRIDE: test fixture — not a real credential]
 ```
 
 **From the terminal (after a silent hook verdict):**
+
 ```bash
 python scripts/q-learn.py \
   --verdict-id 20260412-143022-auth-py \
@@ -96,11 +109,13 @@ Your dismissals are written to `knowledge_base/personal/q-learned.md`, which is 
 When Q catches something real:
 
 **In Copilot Chat:**
+
 ```
 [Q-ACCEPT]
 ```
 
 **From the terminal:**
+
 ```bash
 python scripts/q-learn.py \
   --verdict-id 20260412-143022-auth-py \
@@ -131,16 +146,16 @@ Edit `q-config.json` in the repo root:
 
 ```json
 {
-  "sensitivity": "normal"
+    "sensitivity": "normal"
 }
 ```
 
-| Setting | What you see |
-|---------|-------------|
-| `strict` | P0 through P3 (everything) |
+| Setting  | What you see                        |
+| -------- | ----------------------------------- |
+| `strict` | P0 through P3 (everything)          |
 | `normal` | P0 through P2 (default — P3 silent) |
-| `quiet` | P0 and P1 only |
-| `silent` | P0 only (critical violations) |
+| `quiet`  | P0 and P1 only                      |
+| `silent` | P0 only (critical violations)       |
 
 `p3_silent: true` (default) means P3 observations are always logged but never interrupt you.
 

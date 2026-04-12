@@ -12,8 +12,8 @@
 ## Verdict Log
 
 | Date | Verdict ID | File | Rule | Severity | Message | Outcome | Mode |
-|------|------------|------|------|----------|---------|---------|------|
-| — | — | — | — | — | — | — | — |
+| ---- | ---------- | ---- | ---- | -------- | ------- | ------- | ---- |
+| —    | —          | —    | —    | —        | —       | —       | —    |
 
 _No verdicts yet._
 
@@ -21,10 +21,10 @@ _No verdicts yet._
 
 ## Outcome Key
 
-| Outcome | Meaning |
-|---------|---------|
-| `flagged` | Verdict issued, awaiting user response |
-| `accepted` | User responded [Q-ACCEPT] — confirmed as wrong |
+| Outcome      | Meaning                                             |
+| ------------ | --------------------------------------------------- |
+| `flagged`    | Verdict issued, awaiting user response              |
+| `accepted`   | User responded [Q-ACCEPT] — confirmed as wrong      |
 | `overridden` | User responded [Q-OVERRIDE] — dismissed with reason |
-| `clean` | No violation detected |
-| `skipped` | File excluded by config or sensitivity setting |
+| `clean`      | No violation detected                               |
+| `skipped`    | File excluded by config or sensitivity setting      |
