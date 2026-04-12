@@ -103,7 +103,9 @@ function sensitivityAllows(config, severity) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function getFileDiff(filePath, workspaceRoot) {
-    const opts = { cwd: workspaceRoot, timeout: 8000 };
+    // Run git from the file's own directory so it finds the correct repo,
+    // regardless of which workspace folder is "first" in a multi-root setup.
+    const opts = { cwd: path.dirname(filePath), timeout: 8000 };
     try {
         let diff = cp.execSync(`git diff HEAD -- "${filePath}"`, opts).toString();
         if (!diff) diff = cp.execSync(`git diff -- "${filePath}"`, opts).toString();
@@ -338,9 +340,19 @@ function logVerdict(workspaceRoot, config, filePath, verdict) {
 // Workspace helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-function getWorkspaceRoot() {
+function getWorkspaceRoot(filePath) {
     const folders = vscode.workspace.workspaceFolders;
-    return folders && folders.length > 0 ? folders[0].uri.fsPath : null;
+    if (!folders || folders.length === 0) return null;
+    if (!filePath) return folders[0].uri.fsPath;
+
+    // In a multi-root workspace, find the folder that contains this file
+    const normalizedFile = filePath.replace(/\\/g, '/');
+    const match = folders
+        .map(f => f.uri.fsPath)
+        .sort((a, b) => b.length - a.length) // longest match first
+        .find(f => normalizedFile.startsWith(f.replace(/\\/g, '/')));
+
+    return match || folders[0].uri.fsPath;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -361,7 +373,7 @@ function activate(context) {
 
     // File save listener — the core always-on trigger
     const saveListener = vscode.workspace.onDidSaveTextDocument(async (document) => {
-        const workspaceRoot = getWorkspaceRoot();
+        const workspaceRoot = getWorkspaceRoot(document.fileName);
         if (!workspaceRoot) return;
 
         const config = loadQConfig(workspaceRoot);
@@ -413,7 +425,7 @@ function activate(context) {
             const editor = vscode.window.activeTextEditor;
             if (!editor) { vscode.window.showInformationMessage('Q: No active file to review.'); return; }
 
-            const workspaceRoot = getWorkspaceRoot();
+            const workspaceRoot = getWorkspaceRoot(editor.document.fileName);
             if (!workspaceRoot) { vscode.window.showInformationMessage('Q: No workspace open.'); return; }
 
             const config = loadQConfig(workspaceRoot) || DEFAULT_CONFIG;
@@ -447,7 +459,8 @@ function activate(context) {
     // Open personal learned exceptions command
     context.subscriptions.push(
         vscode.commands.registerCommand('q.openLearned', async () => {
-            const workspaceRoot = getWorkspaceRoot();
+            const activeFile = vscode.window.activeTextEditor?.document.fileName;
+            const workspaceRoot = getWorkspaceRoot(activeFile);
             if (!workspaceRoot) return;
             const config = loadQConfig(workspaceRoot) || DEFAULT_CONFIG;
             const personalPath = path.join(
@@ -465,7 +478,8 @@ function activate(context) {
     // Open team exceptions command
     context.subscriptions.push(
         vscode.commands.registerCommand('q.openTeamExceptions', async () => {
-            const workspaceRoot = getWorkspaceRoot();
+            const activeFile = vscode.window.activeTextEditor?.document.fileName;
+            const workspaceRoot = getWorkspaceRoot(activeFile);
             if (!workspaceRoot) return;
             const config = loadQConfig(workspaceRoot) || DEFAULT_CONFIG;
             const teamPath = path.join(
