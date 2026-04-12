@@ -27,6 +27,84 @@ sys.path.insert(0, str(Path(__file__).parent))
 from q_config import load_config
 
 
+def parse_override_counts(config: dict) -> Counter:
+    """Parse accepted exception counts per rule from team + personal KB files.
+
+    Used for self-calibration: rules with high override rates are miscalibrated.
+    """
+    override_counts: Counter = Counter()
+
+    for path_key in ("team_exceptions_path", "personal_kb_path"):
+        exc_path = Path(config.get(path_key, ""))
+        if not exc_path.exists():
+            continue
+        content = exc_path.read_text(encoding="utf-8")
+
+        in_exceptions = False
+        for line in content.splitlines():
+            if "## Accepted Exceptions" in line:
+                in_exceptions = True
+            elif line.startswith("## "):
+                in_exceptions = False
+            elif in_exceptions and line.startswith("### "):
+                # Header format: ### DATE — RULE-ID — filename
+                parts = line.lstrip("# ").split(" — ")
+                if len(parts) >= 2:
+                    rule_id = parts[1].strip()
+                    if re.match(r"^[A-Z]+-\d+$", rule_id):
+                        override_counts[rule_id] += 1
+
+    return override_counts
+
+
+def build_calibration_section(flag_counts: Counter, override_counts: Counter) -> list[str]:
+    """Build a 'Rules Needing Review' section based on override rates."""
+    if not flag_counts:
+        return []
+
+    lines = [
+        "## Rule Calibration",
+        "",
+        "> Rules with a high override rate are firing too aggressively.",
+        "> Rules with zero fires in this period may no longer be relevant.",
+        "",
+        "| Rule | Flags | Overrides | Override Rate | Recommendation |",
+        "|------|-------|-----------|--------------|----------------|",
+    ]
+
+    flagged_rules = set(flag_counts.keys()) | set(override_counts.keys())
+    needs_attention = False
+
+    for rule in sorted(flagged_rules):
+        flags = flag_counts.get(rule, 0)
+        overrides = override_counts.get(rule, 0)
+        rate = (overrides / flags * 100) if flags > 0 else 0
+        rate_str = f"{rate:.0f}%" if flags > 0 else "n/a"
+
+        if flags == 0 and overrides > 0:
+            rec = "Investigate — overrides but no recent flags"
+            needs_attention = True
+        elif rate >= 60:
+            rec = "⚠️ Reduce severity or add path exception"
+            needs_attention = True
+        elif rate >= 40:
+            rec = "Consider severity reduction"
+            needs_attention = True
+        elif flags == 0:
+            rec = "No recent activity — consider retiring"
+        else:
+            rec = "Healthy"
+
+        lines.append(f"| {rule} | {flags} | {overrides} | {rate_str} | {rec} |")
+
+    lines.append("")
+    if not needs_attention:
+        lines.append("_All rules are well-calibrated in this period._")
+        lines.append("")
+
+    return lines
+
+
 def parse_verdict_table(verdicts_path: Path) -> list[dict]:
     """Parse the markdown table in verdicts/index.md into a list of dicts."""
     if not verdicts_path.exists():
@@ -81,7 +159,7 @@ def filter_by_days(rows: list[dict], days: int) -> list[dict]:
     return result
 
 
-def build_report(rows: list[dict], days: int) -> str:
+def build_report(rows: list[dict], days: int, config: dict | None = None) -> str:
     """Build the Markdown digest from parsed verdict rows."""
     today = datetime.now().strftime("%Y-%m-%d")
     since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -201,6 +279,14 @@ def build_report(rows: list[dict], days: int) -> str:
                 )
             lines.append("")
 
+    # ── Self-calibration ─────────────────────────────────────
+    if config and flagged:
+        rule_flag_counts = Counter(r["rule"] for r in flagged if r["rule"] != "—")
+        override_counts = parse_override_counts(config)
+        calibration_lines = build_calibration_section(rule_flag_counts, override_counts)
+        if calibration_lines:
+            lines += calibration_lines
+
     lines += [
         "---",
         "",
@@ -221,7 +307,7 @@ def main():
 
     all_rows = parse_verdict_table(verdicts_path)
     rows = filter_by_days(all_rows, args.days)
-    report = build_report(rows, args.days)
+    report = build_report(rows, args.days, config)
 
     if args.output:
         output_path = Path(args.output)

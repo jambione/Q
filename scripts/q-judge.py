@@ -14,8 +14,10 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -194,28 +196,43 @@ def call_claude_api(system_prompt: str, user_prompt: str, model: str, api_key: s
 
 
 def get_file_diff(file_path: str) -> str:
-    """Get git diff for a specific file against HEAD."""
+    """Get git diff for a specific file against HEAD.
+
+    Returns empty string for untracked files (no git context = no meaningful diff).
+    Uses -U30 to include 30 lines of context so Q can see surrounding code.
+    """
+    cwd = str(Path(file_path).parent)
     try:
+        # Skip untracked files — no git history means no actionable diff context
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--", file_path],
+            capture_output=True, text=True, timeout=5, cwd=cwd
+        )
+        if status.returncode == 0 and status.stdout.strip().startswith("??"):
+            return ""
+
+        # -U30: 30 lines of context so Q understands hot paths, class boundaries, etc.
         result = subprocess.run(
-            ["git", "diff", "HEAD", "--", file_path],
-            capture_output=True, text=True, timeout=10
+            ["git", "diff", "-U30", "HEAD", "--", file_path],
+            capture_output=True, text=True, timeout=10, cwd=cwd
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout
 
-        # If no diff vs HEAD, try diff of unstaged changes
         result = subprocess.run(
-            ["git", "diff", "--", file_path],
-            capture_output=True, text=True, timeout=10
+            ["git", "diff", "-U30", "--", file_path],
+            capture_output=True, text=True, timeout=10, cwd=cwd
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout
 
-        # Fall back to showing the full file content as a pseudo-diff
-        if Path(file_path).exists():
-            content = Path(file_path).read_text(encoding="utf-8", errors="replace")
-            lines = content.splitlines()
-            return "\n".join(f"+ {line}" for line in lines[:100])
+        # Staged new file
+        result = subprocess.run(
+            ["git", "diff", "-U30", "--cached", "--", file_path],
+            capture_output=True, text=True, timeout=10, cwd=cwd
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout
 
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
@@ -358,32 +375,58 @@ def main():
             sys.exit(0)
 
     any_flagged = False
-    for file_path in files_to_judge:
-        verdict = judge_file(file_path, config, api_key)
 
+    # Rate limiting: track API call timestamps
+    rate_limit = config.get("rate_limit_per_minute", 10)
+    call_times: list[float] = []
+
+    def rate_limited_judge(fp: str) -> tuple[str, dict]:
+        """Judge a file, sleeping if needed to stay within rate limit."""
+        now = time.time()
+        window_start = now - 60.0
+        # Prune old timestamps (thread-safe via GIL for list ops)
+        while call_times and call_times[0] < window_start:
+            call_times.pop(0)
+        if len(call_times) >= rate_limit:
+            sleep_for = 60.0 - (now - call_times[0]) + 0.1
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+        call_times.append(time.time())
+        return fp, judge_file(fp, config, api_key)
+
+    if args.diff and len(files_to_judge) > 1:
+        # CI mode: judge files in parallel (up to 4 at a time, rate-limited)
+        results: list[tuple[str, dict]] = []
+        with ThreadPoolExecutor(max_workers=min(4, len(files_to_judge))) as executor:
+            futures = {executor.submit(rate_limited_judge, fp): fp for fp in files_to_judge}
+            for future in as_completed(futures):
+                try:
+                    results.append(future.result())
+                except Exception as exc:
+                    print(f"[Q ERROR] {futures[future]}: {exc}", file=sys.stderr)
+    else:
+        # Hook mode or single file: sequential
+        results = [rate_limited_judge(fp) for fp in files_to_judge]
+
+    for file_path, verdict in results:
         if verdict.get("skipped"):
             continue
 
-        # Generate a short verdict ID
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         short_file = Path(file_path).name.replace(".", "-")
         verdict_id = f"{timestamp}-{short_file}"
 
-        # Check sensitivity filter
         if verdict.get("flagged"):
             severity = verdict.get("severity", "P2")
             append_verdict(config, verdict_id, file_path, verdict)
 
             if not sensitivity_allows(config, severity):
-                # Below sensitivity threshold — logged silently, no terminal output
                 continue
 
             print(format_verdict_output(file_path, verdict, verdict_id))
 
             if is_ci_gate(config, severity):
                 any_flagged = True
-        else:
-            pass  # Clean — silent
 
     sys.exit(1 if any_flagged else 0)
 

@@ -14,6 +14,7 @@ Pure stdlib. No external dependencies.
 """
 
 import argparse
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -22,16 +23,53 @@ sys.path.insert(0, str(Path(__file__).parent))
 from q_config import load_config
 
 
+def get_path_pattern(file_path: str) -> str | None:
+    """Derive a directory glob pattern from a file path for path-aware exceptions.
+
+    Tries to produce a relative path (from git root). Falls back to using
+    the directory portion of the raw path. Returns None if path is unknown.
+
+    Example: tests/fixtures/mock_config.py → tests/fixtures/**
+    """
+    if not file_path:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(Path(file_path).parent),
+        )
+        if result.returncode == 0:
+            repo_root = Path(result.stdout.strip())
+            rel = Path(file_path).resolve().relative_to(repo_root)
+            # Return the directory as a glob pattern
+            parts = rel.parts
+            if len(parts) > 1:
+                return str(Path(*parts[:-1])) + "/**"
+    except Exception:
+        pass
+
+    # Fallback: use the directory portion of the path
+    parent = Path(file_path).parent
+    if parent != Path(file_path):
+        return str(parent) + "/**"
+    return None
+
+
 def append_accepted_exception(learned_path: Path, verdict_id: str, reason: str, rule_id: str = None, file_path: str = None) -> None:
     """Append an override entry to the Accepted Exceptions section."""
     date = datetime.now().strftime("%Y-%m-%d")
     rule_str = f" — {rule_id}" if rule_id else ""
     file_str = f" — {file_path}" if file_path else ""
 
+    # Path-aware pattern: helps Q auto-apply this exception to similar files
+    path_pattern = get_path_pattern(file_path) if file_path else None
+    pattern_line = f"\nPath pattern: `{path_pattern}`" if path_pattern else ""
+
     entry = f"""
 ### {date}{rule_str}{file_str}
 Verdict: `{verdict_id}`
-User override: {reason}
+User override: {reason}{pattern_line}
 """
 
     content = learned_path.read_text(encoding="utf-8")

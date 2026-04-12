@@ -1,5 +1,7 @@
 // Q — Code Conscience VS Code Extension
-// Always-on file watcher using GitHub Copilot's Language Model API.
+// v0.2.0 — debounce, diff cache, pre-filter, model tiering, inline diagnostics,
+//           rate limiting, path-aware learning, auto-suggest, false-negative signal
+//
 // No Anthropic key required. Uses your existing Copilot subscription.
 
 'use strict';
@@ -8,10 +10,10 @@ const vscode = require('vscode');
 const path = require('path');
 const fs = require('fs');
 const cp = require('child_process');
+const crypto = require('crypto');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Embedded rules — same source of truth as q.agent.md.
-// If you add a rule to q.agent.md, add it here too.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const Q_RULES = `
@@ -45,9 +47,11 @@ const SYSTEM_PROMPT = `You are Q — not an assistant, not a linter, but an omni
 You make binary judgments about code changes based strictly on the rules provided. Never invent rules. Never hedge.
 
 Respond ONLY with valid JSON — no other text:
-{"flagged":true,"severity":"P0","rule_id":"SEC-001","message":"One sentence in Q's voice.","kb_excerpt":"Exact rule text that triggered this."}
+{"flagged":true,"severity":"P0","rule_id":"SEC-001","message":"One sentence in Q's voice.","kb_excerpt":"Exact rule text that triggered this.","line_number":42}
 OR if nothing is wrong:
 {"flagged":false}
+
+The "line_number" field is the 1-based line in the file where the violation occurs. Include it when you can determine it from the diff context. Omit if unknown.
 
 The "message" field must be written in Q's voice: theatrical, condescending, wickedly amused, and exactly one sentence. Examples:
 - P0: "You've hardcoded a credential — how delightfully reckless."
@@ -61,16 +65,46 @@ Rules: ONLY flag clear violations explicitly in the rule list. Apply learned exc
 Severity: P0=critical never merge, P1=fix before merge, P2=quality concern, P3=silent log only.`;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Pre-filter: high-signal keywords that indicate a likely violation
+// If NONE of these appear in the added lines, skip the API call entirely.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const HIGH_SIGNAL_KEYWORDS = [
+    // SEC: credentials
+    'password', 'api_key', 'apikey', 'secret', 'token', 'credential', 'private_key',
+    // SEC: security controls
+    'verify=False', 'verify = False', 'rejectUnauthorized', 'ssl._create_unverified', '0777', '0o777', 'chmod',
+    // SEC: SQL
+    '" + ', "' + ", 'execute(', 'cursor.execute', 'SELECT ', 'INSERT ', 'UPDATE ', 'DELETE ',
+    // ERR: silent catches
+    'except Exception', 'except BaseException', 'except:', ': pass',
+    // PERF: blocking I/O
+    'requests.get(', 'requests.post(', 'time.sleep(', 'urllib.request',
+    // TEST: skips
+    '@skip', '@pytest.mark.skip', 'it.skip(', 'test.skip(', 'xit(',
+    // ERR/ARCH
+    'TODO', 'FIXME', 'HACK',
+];
+
+// Separate list: keywords that indicate HIGH risk — use best model
+const CRITICAL_KEYWORDS = [
+    'password', 'api_key', 'apikey', 'secret', 'token', 'credential',
+    'verify=False', 'rejectUnauthorized', 'ssl._create_unverified',
+    'execute(', 'cursor.execute',
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Config
 // ─────────────────────────────────────────────────────────────────────────────
 
 const DEFAULT_CONFIG = {
-    sensitivity: 'normal',       // strict / normal / quiet / silent
-    mode: 'normal',              // normal / fast
+    sensitivity: 'normal',
+    mode: 'normal',
     watched_extensions: ['.py', '.ts', '.js', '.go', '.java', '.cs', '.rb', '.php', '.swift', '.kt'],
     exclude_patterns: ['node_modules', '.git', 'dist', 'out', 'build', '__pycache__', '.min.js'],
     p3_silent: true,
-    max_diff_lines: 300,
+    max_diff_lines: 350,
+    rate_limit_per_minute: 10,
 };
 
 function loadQConfig(workspaceRoot) {
@@ -99,38 +133,101 @@ function sensitivityAllows(config, severity) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Diff + KB
+// Pre-filter: classify diff before touching the API
+// Returns: 'skip' | 'standard' | 'critical'
 // ─────────────────────────────────────────────────────────────────────────────
 
-function getFileDiff(filePath, workspaceRoot) {
-    // Run git from the file's own directory so it finds the correct repo,
-    // regardless of which workspace folder is "first" in a multi-root setup.
+function classifyDiff(diff) {
+    // Extract only lines being added (not context or removals)
+    const addedLines = diff.split('\n')
+        .filter(l => l.startsWith('+') && !l.startsWith('+++'))
+        .map(l => l.slice(1).trim())
+        .filter(l => l && !l.startsWith('#') && !l.startsWith('//') && !l.startsWith('*'));
+
+    // No meaningful code additions → safe to skip entirely
+    if (addedLines.length === 0) return 'skip';
+
+    const joined = addedLines.join('\n');
+
+    if (CRITICAL_KEYWORDS.some(kw => joined.includes(kw))) return 'critical';
+    if (HIGH_SIGNAL_KEYWORDS.some(kw => joined.includes(kw))) return 'standard';
+    return 'skip';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rate limiter
+// ─────────────────────────────────────────────────────────────────────────────
+
+const callTimestamps = [];
+
+function checkRateLimit(config) {
+    const limit = config.rate_limit_per_minute || 10;
+    const now = Date.now();
+    const windowStart = now - 60000;
+    while (callTimestamps.length && callTimestamps[0] < windowStart) callTimestamps.shift();
+    if (callTimestamps.length >= limit) return false;
+    callTimestamps.push(now);
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Diff cache: skip API call if diff hasn't changed since last verdict
+// ─────────────────────────────────────────────────────────────────────────────
+
+const verdictCache = new Map(); // filePath -> { hash, verdict }
+
+function hashString(str) {
+    return crypto.createHash('md5').update(str).digest('hex').slice(0, 12);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dismiss tracker: auto-suggest path exception after N dismissals
+// ─────────────────────────────────────────────────────────────────────────────
+
+const AUTO_SUGGEST_THRESHOLD = 3;
+let dismissCounts; // Map loaded from workspaceState in activate()
+
+function getDirPattern(filePath) {
+    const parts = filePath.replace(/\\/g, '/').split('/');
+    if (parts.length <= 1) return null;
+    // Return the first 2-3 directory levels as a pattern
+    const meaningful = parts.slice(0, -1).filter(p => !p.match(/^[A-Z]:/));
+    return meaningful.length > 0 ? meaningful.join('/') + '/**' : null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Diff — with context, untracked file guard
+// ─────────────────────────────────────────────────────────────────────────────
+
+function getFileDiff(filePath) {
     const opts = { cwd: path.dirname(filePath), timeout: 8000 };
     try {
-        let diff = cp.execSync(`git diff HEAD -- "${filePath}"`, opts).toString();
-        if (!diff) diff = cp.execSync(`git diff -- "${filePath}"`, opts).toString();
-        if (!diff) {
-            // New file — show first 100 lines as pseudo-diff
-            const content = fs.readFileSync(filePath, 'utf8');
-            diff = content.split('\n').slice(0, 100).map(l => `+ ${l}`).join('\n');
-        }
-        // Truncate
+        // Skip untracked files — no git history means no meaningful diff context
+        const status = cp.execSync(`git status --porcelain -- "${filePath}"`, opts).toString().trim();
+        if (status.startsWith('??')) return null;
+
+        // -U30: 30 lines of context so Q can see surrounding code (hot paths, class boundaries, etc.)
+        let diff = cp.execSync(`git diff -U30 HEAD -- "${filePath}"`, opts).toString();
+        if (!diff) diff = cp.execSync(`git diff -U30 -- "${filePath}"`, opts).toString();
+        if (!diff) diff = cp.execSync(`git diff -U30 --cached -- "${filePath}"`, opts).toString();
+        if (!diff) return null;
+
         const lines = diff.split('\n');
-        return lines.length > 300 ? lines.slice(0, 300).join('\n') + '\n... (truncated)' : diff;
+        return lines.length > 350 ? lines.slice(0, 350).join('\n') + '\n... (truncated)' : diff;
     } catch {
         return null;
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Two-tier exception loading
+// ─────────────────────────────────────────────────────────────────────────────
+
 function loadLearned(config, workspaceRoot) {
     const sections = [];
 
-    // Team-approved exceptions (committed, shared)
     try {
-        const teamPath = path.join(
-            workspaceRoot,
-            config.team_exceptions_path || 'knowledge_base/team/exceptions/approved.md'
-        );
+        const teamPath = path.join(workspaceRoot, config.team_exceptions_path || 'knowledge_base/team/exceptions/approved.md');
         if (fs.existsSync(teamPath)) {
             const content = fs.readFileSync(teamPath, 'utf8');
             if (content.includes('###')) {
@@ -139,12 +236,8 @@ function loadLearned(config, workspaceRoot) {
         }
     } catch { /* ignore */ }
 
-    // Personal overrides (gitignored, per-developer)
     try {
-        const personalPath = path.join(
-            workspaceRoot,
-            config.personal_kb_path || 'knowledge_base/personal/q-learned.md'
-        );
+        const personalPath = path.join(workspaceRoot, config.personal_kb_path || 'knowledge_base/personal/q-learned.md');
         if (fs.existsSync(personalPath)) {
             const content = fs.readFileSync(personalPath, 'utf8');
             if (!content.includes('No entries yet') || content.includes('###')) {
@@ -157,38 +250,43 @@ function loadLearned(config, workspaceRoot) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Copilot LM call
+// Copilot LM call — model tiering based on risk classification
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function callCopilot(filePath, diff, learned, cancellationToken) {
-    // Select best available Copilot model
-    let models = await vscode.lm.selectChatModels({ vendor: 'copilot', family: 'gpt-4o' });
-    if (!models.length) models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-    if (!models.length) throw new Error('No Copilot model available. Is GitHub Copilot installed and signed in?');
+async function selectModel(riskLevel) {
+    // Critical risk: use best available model
+    // Standard risk: try a faster model first
+    const preferredFamilies = riskLevel === 'critical'
+        ? ['gpt-4o', 'gpt-4-turbo', 'gpt-4', 'claude-sonnet']
+        : ['gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4o', 'gpt-4'];
 
-    const model = models[0];
+    for (const family of preferredFamilies) {
+        const models = await vscode.lm.selectChatModels({ vendor: 'copilot', family });
+        if (models.length > 0) return models[0];
+    }
+    // Final fallback: any copilot model
+    const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
+    if (models.length > 0) return models[0];
+    throw new Error('No Copilot model available. Is GitHub Copilot installed and signed in?');
+}
 
-    const learned_section = learned
+async function callCopilot(filePath, diff, learned, riskLevel, cancellationToken) {
+    const model = await selectModel(riskLevel);
+
+    const learnedSection = learned
         ? `\n\n[LEARNED EXCEPTIONS — DO NOT RE-FLAG THESE]\n${learned}`
         : '';
 
-    const userMessage = `[RULES]\n${Q_RULES}${learned_section}\n\n[CODE CHANGE]\nFile: ${filePath}\nDiff:\n${diff}`;
-
-    const messages = [
-        vscode.LanguageModelChatMessage.User(`${SYSTEM_PROMPT}\n\n${userMessage}`)
-    ];
+    const userMessage = `[RULES]\n${Q_RULES}${learnedSection}\n\n[CODE CHANGE]\nFile: ${filePath}\nDiff:\n${diff}`;
+    const messages = [vscode.LanguageModelChatMessage.User(`${SYSTEM_PROMPT}\n\n${userMessage}`)];
 
     const response = await model.sendRequest(messages, {}, cancellationToken);
 
-    // Stream the full response text
     let text = '';
     for await (const chunk of response.stream) {
-        if (chunk instanceof vscode.LanguageModelTextPart) {
-            text += chunk.value;
-        }
+        if (chunk instanceof vscode.LanguageModelTextPart) text += chunk.value;
     }
 
-    // Parse JSON — handle model wrapping it in markdown fences
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return { flagged: false };
     try {
@@ -199,12 +297,62 @@ async function callCopilot(filePath, diff, learned, cancellationToken) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Verdict output
+// Inline diagnostics
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DIAGNOSTIC_SEVERITY = {
+    P0: vscode.DiagnosticSeverity.Error,
+    P1: vscode.DiagnosticSeverity.Error,
+    P2: vscode.DiagnosticSeverity.Warning,
+    P3: vscode.DiagnosticSeverity.Information,
+};
+
+function updateDiagnostics(diagnosticCollection, filePath, verdict) {
+    const uri = vscode.Uri.file(filePath);
+
+    if (!verdict.flagged) {
+        diagnosticCollection.set(uri, []); // clear any previous squiggle
+        return;
+    }
+
+    let lineNumber = 0;
+
+    // Use LLM-reported line number if available (1-based → 0-based)
+    if (verdict.line_number && verdict.line_number > 0) {
+        lineNumber = verdict.line_number - 1;
+    } else {
+        // Infer from the diff: find the first added line's target line number
+        try {
+            const content = fs.readFileSync(filePath, 'utf8').split('\n');
+            const message = verdict.message || '';
+            // Try to find a line in the file matching keywords from the message
+            // (best-effort — fall back to line 0 if not found)
+            const keywords = (verdict.rule_id || '').split('-')[0].toLowerCase();
+            lineNumber = content.findIndex(l => l.toLowerCase().includes(keywords));
+            if (lineNumber < 0) lineNumber = 0;
+        } catch { lineNumber = 0; }
+    }
+
+    const range = new vscode.Range(lineNumber, 0, lineNumber, Number.MAX_SAFE_INTEGER);
+    const severity = DIAGNOSTIC_SEVERITY[verdict.severity] || vscode.DiagnosticSeverity.Warning;
+    const diag = new vscode.Diagnostic(
+        range,
+        `Q [${verdict.rule_id}]: ${verdict.message}`,
+        severity
+    );
+    diag.source = 'Q';
+    diag.code = verdict.rule_id;
+
+    diagnosticCollection.set(uri, [diag]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Verdict output + learning
 // ─────────────────────────────────────────────────────────────────────────────
 
 const SEVERITY_ICONS = { P0: '🔴', P1: '🟠', P2: '🟡', P3: '⚪' };
 
-async function showVerdict(verdict, filePath, config, workspaceRoot) {
+async function showVerdict(verdict, filePath, config, workspaceRoot, context) {
     const severity = verdict.severity || 'P2';
     const ruleId = verdict.rule_id || '?';
     const message = verdict.message || 'Violation detected.';
@@ -212,49 +360,105 @@ async function showVerdict(verdict, filePath, config, workspaceRoot) {
     const fileName = path.basename(filePath);
 
     const notification = `Q ${icon} [${ruleId}] ${fileName}: ${message}`;
+    const verdictId = `${Date.now()}-${fileName.replace(/\./g, '-')}`;
 
     let choice;
     if (severity === 'P0' || severity === 'P1') {
-        choice = await vscode.window.showWarningMessage(notification, 'You\'re right, Q', 'I disagree', 'Enlighten Q');
+        choice = await vscode.window.showWarningMessage(notification, "You're right, Q", 'I disagree', 'Enlighten Q');
     } else {
-        // P2 — less intrusive
         choice = await vscode.window.showInformationMessage(notification, 'I disagree', 'Enlighten Q');
     }
 
     if (!choice) return;
 
-    const verdictId = `${Date.now()}-${fileName.replace(/\./g, '-')}`;
-
-    if (choice === 'You\'re right, Q') {
+    if (choice === "You're right, Q") {
         await recordLearning(workspaceRoot, config, verdictId, 'accept', '', ruleId, filePath, message);
         vscode.window.setStatusBarMessage('Q: ✓ Admitted. The Continuum is satisfied.', 4000);
+
     } else if (choice === 'I disagree') {
         const reason = await vscode.window.showInputBox({
-            prompt: 'Explain yourself. Q will consider your justification and update his records accordingly.',
+            prompt: 'Explain yourself. Q will consider your justification.',
             placeHolder: 'e.g. test fixture — not a real credential',
         });
         if (reason) {
             await recordLearning(workspaceRoot, config, verdictId, 'override', reason, ruleId, filePath, message);
-            vscode.window.setStatusBarMessage(`Q: Very well. I shall note your... creative justification.`, 5000);
+            vscode.window.setStatusBarMessage('Q: Very well. I shall note your... creative justification.', 5000);
+            checkAutoSuggest(ruleId, filePath, context);
         }
+
     } else if (choice === 'Enlighten Q') {
-        const personalPath = path.join(
-            workspaceRoot,
-            config.personal_kb_path || 'knowledge_base/personal/q-learned.md'
-        );
-        const uri = vscode.Uri.file(personalPath);
-        await vscode.window.showTextDocument(uri);
+        const personalPath = path.join(workspaceRoot, config.personal_kb_path || 'knowledge_base/personal/q-learned.md');
+        if (fs.existsSync(personalPath)) {
+            await vscode.window.showTextDocument(vscode.Uri.file(personalPath));
+        }
+    }
+}
+
+async function showCleanVerdict(filePath) {
+    const fileName = path.basename(filePath);
+    const choice = await vscode.window.showInformationMessage(
+        `Q: ${fileName} — Nothing wrong. I find the lack of catastrophe vaguely disappointing.`,
+        'Q missed something'
+    );
+    if (choice === 'Q missed something') {
+        const issue = await vscode.window.showInputBox({
+            prompt: 'What did Q miss? Describe the violation so the rulebook can be improved.',
+            placeHolder: 'e.g. There is an N+1 query on line 42 inside the for loop',
+        });
+        if (issue) {
+            vscode.window.showInformationMessage(
+                `Q: Noted. Consider opening a rule proposal PR — see docs/rule-governance.md.`,
+                'Open governance docs'
+            ).then(sel => {
+                if (sel === 'Open governance docs') {
+                    vscode.commands.executeCommand('vscode.open',
+                        vscode.Uri.parse('https://github.com'));
+                }
+            });
+        }
+    }
+}
+
+function checkAutoSuggest(ruleId, filePath, context) {
+    const dirPattern = getDirPattern(filePath);
+    if (!dirPattern) return;
+
+    const key = `${ruleId}:${dirPattern}`;
+    const counts = context.workspaceState.get('q.dismissCounts') || {};
+    counts[key] = (counts[key] || 0) + 1;
+    context.workspaceState.update('q.dismissCounts', counts);
+
+    if (counts[key] === AUTO_SUGGEST_THRESHOLD) {
+        vscode.window.showInformationMessage(
+            `Q: You've dismissed ${ruleId} in "${dirPattern}" ${AUTO_SUGGEST_THRESHOLD} times. Add a path exception?`,
+            'Add exception', 'Ignore'
+        ).then(choice => {
+            if (choice === 'Add exception') {
+                vscode.window.showInputBox({
+                    prompt: `Add a path exception for ${ruleId} in ${dirPattern}`,
+                    value: `Files in ${dirPattern} are exempt from ${ruleId}`,
+                }).then(reason => {
+                    if (reason) {
+                        // Open terminal with the q-learn command pre-filled
+                        const terminal = vscode.window.createTerminal('Q — Add Exception');
+                        terminal.show();
+                        terminal.sendText(
+                            `python scripts/q-learn.py --verdict-id auto-suggest --response override --reason "${reason.replace(/"/g, '\\"')}"`,
+                            false
+                        );
+                    }
+                });
+            }
+        });
     }
 }
 
 function recordLearning(workspaceRoot, config, verdictId, response, reason, ruleId, filePath, message) {
-    // Always write to personal KB — team exceptions require a PR
     const learnedPath = path.join(
         workspaceRoot,
         config.personal_kb_path || 'knowledge_base/personal/q-learned.md'
     );
 
-    // Auto-create personal KB file if it doesn't exist yet
     if (!fs.existsSync(learnedPath)) {
         const dir = path.dirname(learnedPath);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -268,6 +472,10 @@ function recordLearning(workspaceRoot, config, verdictId, response, reason, rule
     const date = new Date().toISOString().slice(0, 10);
     const fileName = path.basename(filePath);
 
+    // Path-aware: record the relative directory pattern, not just the filename
+    const dirPattern = getDirPattern(filePath);
+    const pathNote = dirPattern ? `\nPath pattern: \`${dirPattern}\`` : '';
+
     let entry, section, placeholder;
 
     if (response === 'accept') {
@@ -277,7 +485,7 @@ function recordLearning(workspaceRoot, config, verdictId, response, reason, rule
     } else {
         section = '## Accepted Exceptions (Q-OVERRIDE)';
         placeholder = '_No entries yet. Added by q-memory after user responds [Q-OVERRIDE: reason]._';
-        entry = `\n### ${date} — ${ruleId} — ${fileName}\nVerdict: \`${verdictId}\`\nUser override: ${reason}\n`;
+        entry = `\n### ${date} — ${ruleId} — ${fileName}\nVerdict: \`${verdictId}\`\nUser override: ${reason}${pathNote}\n`;
     }
 
     let content = fs.readFileSync(learnedPath, 'utf8');
@@ -294,9 +502,7 @@ function recordLearning(workspaceRoot, config, verdictId, response, reason, rule
         content = content.trimEnd() + `\n\n${section}\n${entry}`;
     }
 
-    // Update Last Updated date
     content = content.replace(/\*\*Last Updated\*\*: \d{4}-\d{2}-\d{2}/, `**Last Updated**: ${date}`);
-
     fs.writeFileSync(learnedPath, content, 'utf8');
 }
 
@@ -305,10 +511,7 @@ function recordLearning(workspaceRoot, config, verdictId, response, reason, rule
 // ─────────────────────────────────────────────────────────────────────────────
 
 function logVerdict(workspaceRoot, config, filePath, verdict) {
-    const verdictIndexPath = path.join(
-        workspaceRoot,
-        config.verdicts_path || 'knowledge_base/verdicts/index.md'
-    );
+    const verdictIndexPath = path.join(workspaceRoot, config.verdicts_path || 'knowledge_base/verdicts/index.md');
     if (!fs.existsSync(verdictIndexPath)) return;
 
     const date = new Date().toISOString().slice(0, 10);
@@ -318,18 +521,18 @@ function logVerdict(workspaceRoot, config, filePath, verdict) {
     const message = verdict.flagged ? (verdict.message || '—').replace(/\|/g, '/') : '—';
     const outcome = verdict.flagged ? 'flagged' : 'clean';
 
-    const row = `| ${date} | ${verdictId} | \`${path.basename(filePath)}\` | ${ruleId} | ${severity} | ${message} | ${outcome} | copilot-ext |\n`;
+    const row = `| ${date} | ${verdictId} | \`${path.basename(filePath)}\` | ${ruleId} | ${severity} | ${message} | ${outcome} | copilot-ext |`;
 
     let content = fs.readFileSync(verdictIndexPath, 'utf8');
     if (content.includes('_No verdicts yet._')) {
         content = content.replace(
             '| — | — | — | — | — | — | — | — |\n\n_No verdicts yet._',
-            `| — | — | — | — | — | — | — | — |\n${row.trim()}`
+            `| — | — | — | — | — | — | — | — |\n${row}`
         );
     } else {
         const lines = content.split('\n');
         for (let i = lines.length - 1; i >= 0; i--) {
-            if (lines[i].startsWith('|')) { lines.splice(i + 1, 0, row.trim()); break; }
+            if (lines[i].startsWith('|')) { lines.splice(i + 1, 0, row); break; }
         }
         content = lines.join('\n');
     }
@@ -337,7 +540,7 @@ function logVerdict(workspaceRoot, config, filePath, verdict) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Workspace helpers
+// Multi-root workspace: find the folder that owns this file
 // ─────────────────────────────────────────────────────────────────────────────
 
 function getWorkspaceRoot(filePath) {
@@ -345,11 +548,10 @@ function getWorkspaceRoot(filePath) {
     if (!folders || folders.length === 0) return null;
     if (!filePath) return folders[0].uri.fsPath;
 
-    // In a multi-root workspace, find the folder that contains this file
     const normalizedFile = filePath.replace(/\\/g, '/');
     const match = folders
         .map(f => f.uri.fsPath)
-        .sort((a, b) => b.length - a.length) // longest match first
+        .sort((a, b) => b.length - a.length)
         .find(f => normalizedFile.startsWith(f.replace(/\\/g, '/')));
 
     return match || folders[0].uri.fsPath;
@@ -360,7 +562,11 @@ function getWorkspaceRoot(filePath) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function activate(context) {
-    // Status bar item — always visible when Q is installed
+    // Inline diagnostic squiggles
+    const diagnosticCollection = vscode.languages.createDiagnosticCollection('q');
+    context.subscriptions.push(diagnosticCollection);
+
+    // Status bar
     const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     statusBar.text = 'Q: ◦';
     statusBar.tooltip = 'Q Code Conscience — idle';
@@ -368,58 +574,94 @@ function activate(context) {
     statusBar.show();
     context.subscriptions.push(statusBar);
 
-    // Cancellation source for in-flight requests
     let currentCts = null;
+    let debounceTimer = null;
 
-    // File save listener — the core always-on trigger
+    // ── File save listener ──────────────────────────────────────────────────
     const saveListener = vscode.workspace.onDidSaveTextDocument(async (document) => {
         const workspaceRoot = getWorkspaceRoot(document.fileName);
         if (!workspaceRoot) return;
 
         const config = loadQConfig(workspaceRoot);
-        if (!config) return; // No q-config.json in workspace — Q stays dormant
+        if (!config) return;
 
         if (!shouldWatch(config, document.fileName)) return;
 
-        const diff = getFileDiff(document.fileName, workspaceRoot);
-        if (!diff || diff.trim().length < 10) return;
+        // Debounce: wait 1.5s after last save before firing
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(async () => {
 
-        // Cancel any previous in-flight request
-        if (currentCts) currentCts.cancel();
-        currentCts = new vscode.CancellationTokenSource();
+            const diff = getFileDiff(document.fileName);
+            if (!diff) return; // untracked file or no changes
 
-        statusBar.text = 'Q: ⟳';
-        statusBar.tooltip = `Q — checking ${path.basename(document.fileName)}`;
+            // Pre-filter: skip if no meaningful code changes
+            const riskLevel = classifyDiff(diff);
+            if (riskLevel === 'skip') return;
 
-        try {
-            const learned = loadLearned(config, workspaceRoot);
-            const verdict = await callCopilot(document.fileName, diff, learned, currentCts.token);
+            // Diff cache: skip if verdict already known for this exact diff
+            const diffHash = hashString(diff);
+            const cached = verdictCache.get(document.fileName);
+            if (cached && cached.hash === diffHash) {
+                // Re-apply cached diagnostics without an API call
+                if (cached.verdict.flagged && sensitivityAllows(config, cached.verdict.severity)) {
+                    updateDiagnostics(diagnosticCollection, document.fileName, cached.verdict);
+                }
+                return;
+            }
 
-            logVerdict(workspaceRoot, config, document.fileName, verdict);
+            // Rate limit
+            if (!checkRateLimit(config)) {
+                statusBar.text = 'Q: ◦';
+                statusBar.tooltip = 'Q — rate limit reached, check skipped';
+                return;
+            }
 
-            if (verdict.flagged && sensitivityAllows(config, verdict.severity)) {
-                statusBar.text = `Q: ● ${verdict.severity}`;
-                statusBar.tooltip = `Q — ${verdict.rule_id}: ${verdict.message}`;
-                await showVerdict(verdict, document.fileName, config, workspaceRoot);
+            if (currentCts) currentCts.cancel();
+            currentCts = new vscode.CancellationTokenSource();
+
+            statusBar.text = 'Q: ⟳';
+            statusBar.tooltip = `Q — checking ${path.basename(document.fileName)} [${riskLevel}]`;
+
+            try {
+                const learned = loadLearned(config, workspaceRoot);
+                const verdict = await callCopilot(document.fileName, diff, learned, riskLevel, currentCts.token);
+
+                // Cache the verdict
+                verdictCache.set(document.fileName, { hash: diffHash, verdict });
+
+                logVerdict(workspaceRoot, config, document.fileName, verdict);
+                updateDiagnostics(diagnosticCollection, document.fileName, verdict);
+
+                if (verdict.flagged && sensitivityAllows(config, verdict.severity)) {
+                    statusBar.text = `Q: ● ${verdict.severity}`;
+                    statusBar.tooltip = `Q — ${verdict.rule_id}: ${verdict.message}`;
+                    await showVerdict(verdict, document.fileName, config, workspaceRoot, context);
+                }
+
                 statusBar.text = 'Q: ◦';
                 statusBar.tooltip = 'Q Code Conscience — idle';
-            } else {
-                statusBar.text = 'Q: ◦';
-                statusBar.tooltip = 'Q Code Conscience — clean';
+
+            } catch (err) {
+                if (err.name !== 'Cancelled') {
+                    statusBar.text = 'Q: ✕';
+                    statusBar.tooltip = `Q error: ${err.message}`;
+                } else {
+                    statusBar.text = 'Q: ◦';
+                }
             }
-        } catch (err) {
-            // Copilot unavailable or request cancelled — fail silently
-            if (err.name !== 'Cancelled') {
-                statusBar.text = 'Q: ✕';
-                statusBar.tooltip = `Q error: ${err.message}`;
-            } else {
-                statusBar.text = 'Q: ◦';
-            }
-        }
+        }, 1500);
     });
     context.subscriptions.push(saveListener);
 
-    // Manual review command
+    // Clear diagnostics when file is closed
+    context.subscriptions.push(
+        vscode.workspace.onDidCloseTextDocument(doc => {
+            diagnosticCollection.delete(doc.uri);
+            verdictCache.delete(doc.fileName);
+        })
+    );
+
+    // ── Manual review command ───────────────────────────────────────────────
     context.subscriptions.push(
         vscode.commands.registerCommand('q.reviewFile', async () => {
             const editor = vscode.window.activeTextEditor;
@@ -432,21 +674,40 @@ function activate(context) {
 
             if (currentCts) currentCts.cancel();
             currentCts = new vscode.CancellationTokenSource();
-
             statusBar.text = 'Q: ⟳';
+
             try {
-                const diff = getFileDiff(editor.document.fileName, workspaceRoot);
-                if (!diff) { vscode.window.showInformationMessage('Q: No diff detected for this file.'); statusBar.text = 'Q: ◦'; return; }
+                const diff = getFileDiff(editor.document.fileName);
+                if (!diff) {
+                    vscode.window.showInformationMessage('Q: No diff detected — file may be untracked or unchanged.');
+                    statusBar.text = 'Q: ◦';
+                    return;
+                }
+
+                const riskLevel = classifyDiff(diff);
+                if (riskLevel === 'skip') {
+                    vscode.window.showInformationMessage('Q: No meaningful code changes detected.');
+                    statusBar.text = 'Q: ◦';
+                    return;
+                }
+
+                if (!checkRateLimit(config)) {
+                    vscode.window.showWarningMessage('Q: Rate limit reached. Try again in a moment.');
+                    statusBar.text = 'Q: ◦';
+                    return;
+                }
 
                 const learned = loadLearned(config, workspaceRoot);
-                const verdict = await callCopilot(editor.document.fileName, diff, learned, currentCts.token);
+                const verdict = await callCopilot(editor.document.fileName, diff, learned, riskLevel, currentCts.token);
 
+                verdictCache.set(editor.document.fileName, { hash: hashString(diff), verdict });
                 logVerdict(workspaceRoot, config, editor.document.fileName, verdict);
+                updateDiagnostics(diagnosticCollection, editor.document.fileName, verdict);
 
                 if (verdict.flagged) {
-                    await showVerdict(verdict, editor.document.fileName, config, workspaceRoot);
+                    await showVerdict(verdict, editor.document.fileName, config, workspaceRoot, context);
                 } else {
-                    vscode.window.showInformationMessage(`Q: ${path.basename(editor.document.fileName)} — Nothing wrong. I find the lack of catastrophe vaguely disappointing.`);
+                    await showCleanVerdict(editor.document.fileName);
                 }
             } catch (err) {
                 vscode.window.showErrorMessage(`Q error: ${err.message}`);
@@ -456,17 +717,14 @@ function activate(context) {
         })
     );
 
-    // Open personal learned exceptions command
+    // ── Open personal exceptions ────────────────────────────────────────────
     context.subscriptions.push(
         vscode.commands.registerCommand('q.openLearned', async () => {
             const activeFile = vscode.window.activeTextEditor?.document.fileName;
             const workspaceRoot = getWorkspaceRoot(activeFile);
             if (!workspaceRoot) return;
             const config = loadQConfig(workspaceRoot) || DEFAULT_CONFIG;
-            const personalPath = path.join(
-                workspaceRoot,
-                config.personal_kb_path || 'knowledge_base/personal/q-learned.md'
-            );
+            const personalPath = path.join(workspaceRoot, config.personal_kb_path || 'knowledge_base/personal/q-learned.md');
             if (fs.existsSync(personalPath)) {
                 await vscode.window.showTextDocument(vscode.Uri.file(personalPath));
             } else {
@@ -475,17 +733,14 @@ function activate(context) {
         })
     );
 
-    // Open team exceptions command
+    // ── Open team exceptions ────────────────────────────────────────────────
     context.subscriptions.push(
         vscode.commands.registerCommand('q.openTeamExceptions', async () => {
             const activeFile = vscode.window.activeTextEditor?.document.fileName;
             const workspaceRoot = getWorkspaceRoot(activeFile);
             if (!workspaceRoot) return;
             const config = loadQConfig(workspaceRoot) || DEFAULT_CONFIG;
-            const teamPath = path.join(
-                workspaceRoot,
-                config.team_exceptions_path || 'knowledge_base/team/exceptions/approved.md'
-            );
+            const teamPath = path.join(workspaceRoot, config.team_exceptions_path || 'knowledge_base/team/exceptions/approved.md');
             if (fs.existsSync(teamPath)) {
                 await vscode.window.showTextDocument(vscode.Uri.file(teamPath));
             }
