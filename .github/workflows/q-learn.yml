@@ -58,9 +58,9 @@ jobs:
         run: |
           git config user.name "Q Conscience"
           git config user.email "q-conscience@noreply"
-          git add knowledge_base/learned/q-learned.md
+          git add knowledge_base/team/exceptions/approved.md
           if git diff --staged --quiet; then
-            echo "No changes to q-learned.md — nothing to commit."
+            echo "No changes to team exceptions — nothing to commit."
           else
             git commit -m "Q: learning loop update from PR comment [skip ci]"
             git push

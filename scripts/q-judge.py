@@ -165,33 +165,69 @@ def call_claude_api(system_prompt: str, user_prompt: str, model: str, api_key: s
         method="POST",
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8")
-        print(f"[Q ERROR] API call failed ({e.code}): {error_body}", file=sys.stderr)
-        sys.exit(1)
-    except urllib.error.URLError as e:
-        print(f"[Q ERROR] Network error: {e.reason}", file=sys.stderr)
-        sys.exit(1)
+    # Retry with exponential backoff on transient errors (rate limits, network blips)
+    last_err = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            break  # success
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8")
+            # 429 = rate limit, 529 = overloaded — retry after backoff
+            if e.code in (429, 529) and attempt < 2:
+                wait = 2 ** (attempt + 1)
+                print(f"[Q] API rate limited ({e.code}), retrying in {wait}s...", file=sys.stderr)
+                time.sleep(wait)
+                last_err = e
+                continue
+            # 5xx transient server errors — retry once
+            if e.code >= 500 and attempt < 2:
+                time.sleep(2)
+                last_err = e
+                continue
+            print(f"[Q ERROR] API call failed ({e.code}): {error_body}", file=sys.stderr)
+            return {"flagged": False, "api_error": True}
+        except urllib.error.URLError as e:
+            if attempt < 2:
+                time.sleep(2)
+                last_err = e
+                continue
+            print(f"[Q ERROR] Network error: {e.reason}", file=sys.stderr)
+            return {"flagged": False, "api_error": True}
+    else:
+        print(f"[Q ERROR] API unavailable after 3 attempts: {last_err}", file=sys.stderr)
+        return {"flagged": False, "api_error": True}
 
     # Extract text content from response
     content = body.get("content", [])
     if not content or content[0].get("type") != "text":
         print("[Q ERROR] Unexpected API response structure", file=sys.stderr)
-        sys.exit(1)
+        return {"flagged": False}
 
     raw_text = content[0]["text"].strip()
 
     try:
         return json.loads(raw_text)
     except json.JSONDecodeError:
-        # Try to extract JSON from response if model included surrounding text
-        match = re.search(r'\{[^{}]+\}', raw_text, re.DOTALL)
-        if match:
-            return json.loads(match.group())
-        print(f"[Q ERROR] Could not parse verdict JSON: {raw_text}", file=sys.stderr)
+        # Balanced-brace extraction — handles nested JSON the simple regex can't
+        start = raw_text.find("{")
+        if start != -1:
+            depth, end = 0, -1
+            for i, ch in enumerate(raw_text[start:], start):
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+            if end != -1:
+                try:
+                    return json.loads(raw_text[start:end + 1])
+                except json.JSONDecodeError:
+                    pass
+        print(f"[Q ERROR] Could not parse verdict JSON: {raw_text[:200]}", file=sys.stderr)
         return {"flagged": False}
 
 
@@ -330,11 +366,17 @@ def judge_file(file_path: str, config: dict, api_key: str) -> dict:
     if not diff:
         return {"flagged": False, "skipped": True, "reason": "no diff"}
 
-    # Truncate diff if too long
+    # Smart truncation: keep first half + last half so violations near the
+    # end of a large diff aren't silently dropped.
     max_lines = config.get("max_diff_lines", 300)
     diff_lines = diff.splitlines()
     if len(diff_lines) > max_lines:
-        diff = "\n".join(diff_lines[:max_lines]) + f"\n... (truncated at {max_lines} lines)"
+        half = max_lines // 2
+        diff = (
+            "\n".join(diff_lines[:half])
+            + f"\n\n... ({len(diff_lines) - max_lines} lines omitted) ...\n\n"
+            + "\n".join(diff_lines[-half:])
+        )
 
     domain_docs = get_relevant_domains(diff, config["kb_path"])
     learned = load_learned(config)

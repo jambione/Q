@@ -23,6 +23,26 @@ sys.path.insert(0, str(Path(__file__).parent))
 from q_config import load_config
 
 
+def _safe_write(path: Path, content: str) -> None:
+    """Write content to path with retry on transient lock errors (common on Windows)."""
+    import time
+    last_err = None
+    for attempt in range(3):
+        try:
+            path.write_text(content, encoding="utf-8")
+            return
+        except OSError as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(0.3)
+    print(
+        f"[Q ERROR] Could not write to {path}: {last_err}\n"
+        f"  If the file is open in an editor, close it and retry.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def get_path_pattern(file_path: str) -> str | None:
     """Derive a directory glob pattern from a file path for path-aware exceptions.
 
@@ -92,7 +112,7 @@ User override: {reason}{pattern_line}
     else:
         content = content.rstrip() + "\n\n## Accepted Exceptions (Q-OVERRIDE)\n" + entry
 
-    learned_path.write_text(content, encoding="utf-8")
+    _safe_write(learned_path, content)
 
 
 def append_confirmed_wrong(learned_path: Path, verdict_id: str, rule_id: str = None, file_path: str = None, message: str = None) -> None:
@@ -125,7 +145,7 @@ Verdict: `{verdict_id}`{msg_str}
     else:
         content = content.rstrip() + "\n\n## Confirmed Wrong (Q-ACCEPT)\n" + entry
 
-    learned_path.write_text(content, encoding="utf-8")
+    _safe_write(learned_path, content)
 
 
 def update_last_updated(learned_path: Path) -> None:
@@ -139,7 +159,7 @@ def update_last_updated(learned_path: Path) -> None:
         f'**Last Updated**: {date}',
         content
     )
-    learned_path.write_text(content, encoding="utf-8")
+    _safe_write(learned_path, content)
 
 
 def ensure_personal_kb(personal_path: Path) -> None:

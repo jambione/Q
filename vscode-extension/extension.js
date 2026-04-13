@@ -213,7 +213,13 @@ function getFileDiff(filePath) {
         if (!diff) return null;
 
         const lines = diff.split('\n');
-        return lines.length > 350 ? lines.slice(0, 350).join('\n') + '\n... (truncated)' : diff;
+        if (lines.length > 350) {
+            const half = 175;
+            return lines.slice(0, half).join('\n')
+                + `\n\n... (${lines.length - 350} lines omitted) ...\n\n`
+                + lines.slice(-half).join('\n');
+        }
+        return diff;
     } catch {
         return null;
     }
@@ -360,7 +366,7 @@ async function showVerdict(verdict, filePath, config, workspaceRoot, context) {
     const fileName = path.basename(filePath);
 
     const notification = `Q ${icon} [${ruleId}] ${fileName}: ${message}`;
-    const verdictId = `${Date.now()}-${fileName.replace(/\./g, '-')}`;
+    const verdictId = makeVerdictId(filePath);
 
     let choice;
     if (severity === 'P0' || severity === 'P1') {
@@ -406,13 +412,19 @@ async function showCleanVerdict(filePath) {
             placeHolder: 'e.g. There is an N+1 query on line 42 inside the for loop',
         });
         if (issue) {
+            const activeFile = vscode.window.activeTextEditor?.document.fileName;
+            const workspaceRoot = getWorkspaceRoot(activeFile);
             vscode.window.showInformationMessage(
                 `Q: Noted. Consider opening a rule proposal PR — see docs/rule-governance.md.`,
                 'Open governance docs'
             ).then(sel => {
-                if (sel === 'Open governance docs') {
-                    vscode.commands.executeCommand('vscode.open',
-                        vscode.Uri.parse('https://github.com'));
+                if (sel === 'Open governance docs' && workspaceRoot) {
+                    const govDoc = path.join(workspaceRoot, 'docs', 'rule-governance.md');
+                    if (fs.existsSync(govDoc)) {
+                        vscode.window.showTextDocument(vscode.Uri.file(govDoc));
+                    } else {
+                        vscode.window.showInformationMessage('Q: docs/rule-governance.md not found in this workspace.');
+                    }
                 }
             });
         }
@@ -515,7 +527,7 @@ function logVerdict(workspaceRoot, config, filePath, verdict) {
     if (!fs.existsSync(verdictIndexPath)) return;
 
     const date = new Date().toISOString().slice(0, 10);
-    const verdictId = `${Date.now()}-${path.basename(filePath).replace(/\./g, '-')}`;
+    const verdictId = makeVerdictId(filePath);
     const severity = verdict.flagged ? (verdict.severity || '?') : '—';
     const ruleId = verdict.flagged ? (verdict.rule_id || '—') : '—';
     const message = verdict.flagged ? (verdict.message || '—').replace(/\|/g, '/') : '—';
@@ -558,6 +570,18 @@ function getWorkspaceRoot(filePath) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Verdict ID generator — second-precision timestamp + counter for uniqueness
+// ─────────────────────────────────────────────────────────────────────────────
+
+let _verdictCounter = 0;
+function makeVerdictId(filePath) {
+    const ts = new Date().toISOString().replace(/[-T:]/g, '').slice(0, 15); // YYYYMMDDHHmmSS
+    const n = String(++_verdictCounter).padStart(3, '0');
+    const base = path.basename(filePath).replace(/\./g, '-');
+    return `${ts}-${n}-${base}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Activation
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -573,6 +597,22 @@ function activate(context) {
     statusBar.command = 'q.reviewFile';
     statusBar.show();
     context.subscriptions.push(statusBar);
+
+    // One-time Copilot availability check — fail visibly, not silently
+    vscode.lm.selectChatModels({ vendor: 'copilot' }).then(models => {
+        if (models.length === 0) {
+            statusBar.text = 'Q: ✕';
+            statusBar.tooltip = 'Q — GitHub Copilot not found';
+            vscode.window.showWarningMessage(
+                'Q: GitHub Copilot is not available. Install the GitHub Copilot extension and sign in to activate Q.',
+                'Open Extensions'
+            ).then(choice => {
+                if (choice === 'Open Extensions') {
+                    vscode.commands.executeCommand('workbench.extensions.search', 'GitHub.copilot-chat');
+                }
+            });
+        }
+    });
 
     let currentCts = null;
     let debounceTimer = null;

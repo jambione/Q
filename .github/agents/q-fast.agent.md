@@ -24,9 +24,11 @@ You activate when `q-config.json` has `"mode": "fast"` or the user invokes you d
 
 You check **P0 and P1 rules only**. You do not check P2 or P3.
 
-You read `knowledge_base/learned/q-learned.md` once for exceptions, then judge.
+You read two exception sources before judging:
+- `knowledge_base/team/exceptions/approved.md` — team-wide suppressions
+- `knowledge_base/personal/q-learned.md` — personal dismissals (if it exists)
 
-You do not synthesize patterns. You do not trigger q-memory. You do not log to verdicts/index.md unless the violation is P0.
+You do not synthesize patterns and you do not trigger q-memory — if the user responds with `[Q-ACCEPT]` or `[Q-OVERRIDE]`, tell them to run full Q (`q.agent.md`) so the learning loop closes properly. You do not log to verdicts/index.md unless the violation is P0.
 
 ---
 

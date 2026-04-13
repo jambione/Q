@@ -46,10 +46,6 @@ def load_config() -> dict:
         root / config.get("personal_kb_path", "knowledge_base/personal/q-learned.md")
     )
 
-    # Legacy compat: if old learned_path is set, prefer personal_kb_path
-    if "learned_path" in config and "personal_kb_path" not in config:
-        config["personal_kb_path"] = str(root / config["learned_path"])
-
     return config
 
 
@@ -80,8 +76,9 @@ def should_watch_file(config: dict, file_path: str) -> bool:
     if watched and path.suffix.lower() not in watched:
         return False
 
+    # Normalize to forward slashes for consistent cross-platform fnmatch
+    normalized = str(Path(file_path).as_posix())
     for pattern in config.get("exclude_patterns", []):
-        normalized = file_path.replace("\\", "/")
         if fnmatch.fnmatch(normalized, pattern):
             return False
 
@@ -129,12 +126,9 @@ def load_exceptions(config: dict) -> str:
     team_path = Path(config["team_exceptions_path"])
     if team_path.exists():
         team_content = team_path.read_text(encoding="utf-8")
-        if "No team exceptions yet" not in team_content and "## Accepted Exceptions" not in team_content:
-            pass  # placeholder only
-        else:
-            # Only inject if there are real entries
-            if "###" in team_content:
-                sections.append("## Team-Approved Exceptions (apply to all developers)\n" + team_content)
+        # Only inject if there are real exception entries (### date headers)
+        if "###" in team_content:
+            sections.append("## Team-Approved Exceptions (apply to all developers)\n" + team_content)
 
     personal_path = Path(config["personal_kb_path"])
     if personal_path.exists():
