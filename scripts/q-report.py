@@ -27,6 +27,16 @@ sys.path.insert(0, str(Path(__file__).parent))
 from q_config import load_config
 
 
+def _parse_confidence(value) -> float | None:
+    """Parse a confidence value that may be a float, string float, or '—'."""
+    if value is None or value == "—":
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
 def parse_override_counts(config: dict) -> Counter:
     """Parse accepted exception counts per rule from team + personal KB files.
 
@@ -105,6 +115,52 @@ def build_calibration_section(flag_counts: Counter, override_counts: Counter) ->
     return lines
 
 
+def detect_flip_flops(rows: list[dict]) -> list[dict]:
+    """Detect verdicts where Q changed its mind on the same file+rule combination.
+
+    A flip-flop is when the same (file, rule) pair has alternating flagged/clean
+    outcomes within the analysis window. This signals inconsistent judgment —
+    the rule may be too ambiguous or the diff context insufficient.
+
+    Returns a list of flip-flop groups, each with:
+        file, rule, outcomes (list of outcome strings ordered by date), count
+    """
+    from collections import defaultdict
+
+    # Group by (file, rule), sort by date within each group
+    groups: dict[tuple, list[dict]] = defaultdict(list)
+    for row in rows:
+        if row.get("rule") and row.get("rule") != "—" and row.get("file"):
+            key = (row["file"], row["rule"])
+            groups[key].append(row)
+
+    flip_flops = []
+    for (file_path, rule), group_rows in groups.items():
+        if len(group_rows) < 2:
+            continue
+        # Sort by date
+        try:
+            sorted_rows = sorted(group_rows, key=lambda r: r["date"])
+        except Exception:
+            continue
+        outcomes = [r["outcome"] for r in sorted_rows]
+        # A flip-flop: at least one transition between flagged and clean
+        has_flip = any(
+            outcomes[i] != outcomes[i + 1]
+            for i in range(len(outcomes) - 1)
+        )
+        if has_flip:
+            flip_flops.append({
+                "file": file_path,
+                "rule": rule,
+                "outcomes": outcomes,
+                "count": len(outcomes),
+                "dates": [r["date"] for r in sorted_rows],
+            })
+
+    return sorted(flip_flops, key=lambda x: x["count"], reverse=True)
+
+
 def parse_verdict_table(verdicts_path: Path) -> list[dict]:
     """Parse the markdown table in verdicts/index.md into a list of dicts."""
     if not verdicts_path.exists():
@@ -129,7 +185,7 @@ def parse_verdict_table(verdicts_path: Path) -> list[dict]:
             continue
 
         try:
-            rows.append({
+            row_dict = {
                 "date": parts[0],
                 "verdict_id": parts[1],
                 "file": parts[2].strip("`"),
@@ -138,7 +194,9 @@ def parse_verdict_table(verdicts_path: Path) -> list[dict]:
                 "message": parts[5],
                 "outcome": parts[6],
                 "mode": parts[7],
-            })
+                "confidence": parts[8] if len(parts) > 8 else "—",
+            }
+            rows.append(row_dict)
         except IndexError:
             continue
 
@@ -278,6 +336,48 @@ def build_report(rows: list[dict], days: int, config: dict | None = None) -> str
                     f"| {sum(1 for r in day_rows if r['severity'] == 'P2')} |"
                 )
             lines.append("")
+
+    # ── Consistency (flip-flop detection) ────────────────────────
+    flip_flops = detect_flip_flops(rows)
+    if flip_flops:
+        lines += [
+            "## Consistency Issues",
+            "",
+            "> These file+rule pairs had alternating verdicts — Q flagged then cleared then flagged again.",
+            "> This signals the rule may be ambiguous or the diff context insufficient.",
+            "",
+            "| File | Rule | Verdict Sequence | Count |",
+            "|------|------|-----------------|-------|",
+        ]
+        for ff in flip_flops[:10]:  # top 10
+            sequence = " → ".join(ff["outcomes"])
+            lines.append(f"| `{ff['file']}` | {ff['rule']} | {sequence} | {ff['count']} |")
+        lines.append("")
+
+    # ── Low-confidence verdicts ────────────────────────────────────
+    # verdicts/index.md may include a confidence column (added by q-judge v2)
+    low_confidence = [
+        r for r in flagged
+        if r.get("confidence") and r["confidence"] not in ("—", "")
+        and _parse_confidence(r["confidence"]) is not None
+        and _parse_confidence(r["confidence"]) < 0.7
+    ]
+    if low_confidence:
+        lines += [
+            "## Low-Confidence Verdicts",
+            "",
+            "> These verdicts had confidence below 70%. Review manually before acting.",
+            "",
+            "| Date | File | Rule | Severity | Confidence | Message |",
+            "|------|------|------|----------|------------|---------|",
+        ]
+        for r in sorted(low_confidence, key=lambda x: x.get("confidence", 1)):
+            conf_val = _parse_confidence(r.get("confidence", "—"))
+            conf_str = f"{conf_val:.0%}" if conf_val is not None else "—"
+            lines.append(
+                f"| {r['date']} | `{r['file']}` | {r['rule']} | {r['severity']} | {conf_str} | {r['message']} |"
+            )
+        lines.append("")
 
     # ── Self-calibration ─────────────────────────────────────
     if config and flagged:

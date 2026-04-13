@@ -197,5 +197,67 @@ class TestGetPathPattern(unittest.TestCase):
                 self.assertTrue(result.endswith("/**"))
 
 
+class TestTightenRule(unittest.TestCase):
+
+    def _make_domain_doc(self, tmpdir, rule_id="SEC-001"):
+        """Create a minimal domain doc with a User Feedback History section."""
+        doc_path = Path(tmpdir) / "domains" / "security.md"
+        doc_path.parent.mkdir(parents=True, exist_ok=True)
+        doc_path.write_text(
+            f"# Domain: Security\n\n"
+            f"**Owner**: q\n**Review Cadence**: quarterly\n**Last Updated**: 2026-01-01\n\n"
+            f"---\n\n"
+            f"## {rule_id}: No Hardcoded Credentials\n\n"
+            f"**Severity**: P0\n\nDescription here.\n\n"
+            f"### User Feedback History\n"
+            f"_No entries yet._\n",
+            encoding="utf-8",
+        )
+        return doc_path
+
+    def _make_config(self, tmpdir):
+        return {
+            "kb_path": str(tmpdir),
+            "personal_kb_path": str(Path(tmpdir) / "personal" / "q-learned.md"),
+            "team_exceptions_path": str(Path(tmpdir) / "team" / "exceptions" / "approved.md"),
+        }
+
+    def test_appends_to_feedback_history(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            doc = self._make_domain_doc(tmpdir)
+            cfg = self._make_config(tmpdir)
+            result = q_learn.tighten_rule("SEC-001", "Mock credentials in fixtures are OK", cfg)
+            self.assertTrue(result)
+            content = doc.read_text(encoding="utf-8")
+            self.assertIn("Mock credentials in fixtures are OK", content)
+
+    def test_replaces_placeholder(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._make_domain_doc(tmpdir)
+            cfg = self._make_config(tmpdir)
+            q_learn.tighten_rule("SEC-001", "First feedback entry", cfg)
+            doc = Path(tmpdir) / "domains" / "security.md"
+            content = doc.read_text(encoding="utf-8")
+            self.assertNotIn("_No entries yet._", content)
+            self.assertIn("First feedback entry", content)
+
+    def test_unknown_rule_returns_false(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._make_domain_doc(tmpdir)
+            cfg = self._make_config(tmpdir)
+            result = q_learn.tighten_rule("NONEXISTENT-999", "some feedback", cfg)
+            self.assertFalse(result)
+
+    def test_multiple_feedbacks_accumulate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            doc = self._make_domain_doc(tmpdir)
+            cfg = self._make_config(tmpdir)
+            q_learn.tighten_rule("SEC-001", "First entry", cfg)
+            q_learn.tighten_rule("SEC-001", "Second entry", cfg)
+            content = doc.read_text(encoding="utf-8")
+            self.assertIn("First entry", content)
+            self.assertIn("Second entry", content)
+
+
 if __name__ == "__main__":
     unittest.main()

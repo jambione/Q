@@ -184,6 +184,80 @@ def ensure_personal_kb(personal_path: Path) -> None:
     )
 
 
+def tighten_rule(rule_id: str, feedback: str, config: dict) -> bool:
+    """Append user feedback to the ### User Feedback History section of a domain KB doc.
+
+    Finds the domain doc that owns rule_id (by scanning for "## {rule_id}:" headers),
+    then appends a dated entry to its User Feedback History section.
+
+    Returns True if successful, False if the rule doc or section could not be found.
+    """
+    import re as _re
+
+    kb_path = Path(config["kb_path"])
+    domains_dir = kb_path / "domains"
+
+    if not domains_dir.exists():
+        print(f"[Q ERROR] Domains directory not found: {domains_dir}", file=sys.stderr)
+        return False
+
+    # Find the domain doc containing the rule
+    target_doc = None
+    for doc_path in sorted(domains_dir.glob("*.md")):
+        content = doc_path.read_text(encoding="utf-8")
+        if f"## {rule_id}:" in content:
+            target_doc = doc_path
+            break
+
+    if target_doc is None:
+        print(f"[Q ERROR] Rule {rule_id} not found in any domain doc under {domains_dir}", file=sys.stderr)
+        return False
+
+    content = target_doc.read_text(encoding="utf-8")
+    date = datetime.now().strftime("%Y-%m-%d")
+
+    entry = f"- **{date}**: {feedback}"
+
+    # Find the User Feedback History section for this specific rule
+    # Pattern: ## RULE-ID: ... (any content) ... ### User Feedback History
+    # We need to find the right section (the one belonging to rule_id, not a different rule)
+    rule_section_pattern = _re.compile(
+        r'(## ' + _re.escape(rule_id) + r':.*?### User Feedback History\s*\n)'
+        r'(_No entries yet\.[^\n]*)|(.*?\n)',
+        _re.DOTALL
+    )
+
+    # Simpler approach: find the rule's User Feedback History section by line scanning
+    lines = content.splitlines()
+    in_rule_section = False
+    feedback_section_idx = None
+
+    for i, line in enumerate(lines):
+        if line.startswith(f"## {rule_id}:"):
+            in_rule_section = True
+        elif line.startswith("## ") and not line.startswith(f"## {rule_id}:"):
+            in_rule_section = False
+        elif in_rule_section and line.strip() == "### User Feedback History":
+            feedback_section_idx = i
+            break
+
+    if feedback_section_idx is None:
+        print(f"[Q ERROR] '### User Feedback History' not found for rule {rule_id} in {target_doc.name}", file=sys.stderr)
+        return False
+
+    # Insert the entry after the section header (replacing placeholder if present)
+    insert_at = feedback_section_idx + 1
+    # Skip past any existing placeholder line
+    if insert_at < len(lines) and lines[insert_at].strip().startswith("_No entries yet"):
+        lines[insert_at] = entry
+    else:
+        lines.insert(insert_at, entry)
+
+    _safe_write(target_doc, "\n".join(lines) + "\n")
+    print(f"[Q-RULE-TIGHTENED: {target_doc.name} | {rule_id} | {feedback[:60]}]")
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="Q — Learning Loop Writer")
     parser.add_argument("--verdict-id", required=True, help="Verdict ID to close")
@@ -196,6 +270,10 @@ def main():
     parser.add_argument("--team", action="store_true",
                         help="Write to team exceptions (knowledge_base/team/exceptions/approved.md). "
                              "Reminder: this requires a PR review before merging.")
+    parser.add_argument("--tighten-rule", default=None,
+                        help="Rule ID to tighten (e.g. SEC-001). Appends feedback to the rule's "
+                             "User Feedback History section in the domain KB doc. "
+                             "Requires --reason to describe the feedback.")
     args = parser.parse_args()
 
     if args.response == "override" and not args.reason:
@@ -245,6 +323,12 @@ def main():
             print("  Tip: to apply this exception to the whole team, rerun with --team")
             print(f"  python scripts/q-learn.py --verdict-id {args.verdict_id} --response override "
                   f"--reason \"{args.reason}\" --team")
+
+    if args.tighten_rule:
+        if not args.reason:
+            print("[Q ERROR] --reason is required with --tighten-rule", file=sys.stderr)
+            sys.exit(1)
+        tighten_rule(args.tighten_rule, args.reason, config)
 
     update_last_updated(target_path)
     print(f"[Q-VERDICT-CLOSED: {args.verdict_id}]")

@@ -2,7 +2,7 @@
 
 **Owner**: q  
 **Review Cadence**: On every NEW DISCOVERY  
-**Last Updated**: 2026-04-12  
+**Last Updated**: 2026-04-13  
 **Health**: GREEN
 
 ---
@@ -99,6 +99,79 @@ _No entries yet._
 
 A `TODO` or `FIXME` comment inside an exception handler indicates that error handling
 is known to be incomplete. P3 — logged silently, no interrupt.
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## ERR-006: Unhandled Promise Rejection
+
+**Severity**: P1  
+**Pattern**: Async function called without await and without .catch()  
+**Keywords**: async, Promise, .then(, fetch(, axios  
+**Languages**: JavaScript, TypeScript  
+
+An async function call (or Promise-returning function) that is not `await`-ed and has
+no `.catch()` handler. Unhandled rejections silently swallow errors in Node.js and
+browsers, making failures invisible and debugging extremely difficult.
+
+**Safe patterns**:
+- `await asyncFn()` inside an async context
+- `asyncFn().catch(err => logger.error(err))`
+- `Promise.all([...]).catch(...)`
+
+**Exceptions**:
+- Fire-and-forget background tasks that explicitly document they don't need error handling
+- Top-level `process.on('unhandledRejection', ...)` handler present and documented
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## ERR-007: Missing Timeout on External Calls
+
+**Severity**: P1  
+**Pattern**: HTTP request, database query, or subprocess call without an explicit timeout  
+**Keywords**: requests.get, requests.post, fetch(, urllib, subprocess.run, execute(  
+**Languages**: All  
+
+An external call (HTTP, database, subprocess) with no explicit timeout. Without a
+timeout, a slow or hanging dependency will block the caller indefinitely, consuming
+a thread/connection and eventually exhausting the pool.
+
+**Safe patterns**:
+- `requests.get(url, timeout=5)`
+- `fetch(url, { signal: AbortSignal.timeout(5000) })`
+- `subprocess.run(cmd, timeout=30)`
+
+**Exceptions**:
+- Background jobs explicitly designed to run without time constraints (must be documented)
+- Database connections managed by a connection pool with its own timeout configured
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## ERR-008: Swallowing Partial Failure in Batch Operations
+
+**Severity**: P2  
+**Pattern**: Loop over items where exceptions are caught per-item but failures are not reported  
+**Keywords**: for, while, try, except, catch  
+**Languages**: All  
+
+A batch loop that catches exceptions per item with `pass` or silent continue — the
+caller receives no signal that some items failed. This produces partial results that
+look complete.
+
+**Safe pattern**: Accumulate failures and either raise after the loop or return them
+alongside results: `return {"success": results, "failed": failures}`
+
+**Exceptions**:
+- Idempotent retry loops where per-item failure is expected and retried
+- Logging pipelines where individual event failure should not halt processing (must log failures)
 
 ### User Feedback History
 _No entries yet._

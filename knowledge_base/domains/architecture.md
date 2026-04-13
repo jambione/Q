@@ -2,7 +2,7 @@
 
 **Owner**: q  
 **Review Cadence**: On every NEW DISCOVERY  
-**Last Updated**: 2026-04-12  
+**Last Updated**: 2026-04-13  
 **Health**: GREEN
 
 ---
@@ -105,6 +105,70 @@ or read from environment/config files.
 **Exceptions**:
 - Standard port numbers used in comments for documentation
 - Test files where hardcoded values are intentional fixtures
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## ARCH-006: Missing Dependency Injection
+
+**Severity**: P2  
+**Pattern**: Concrete dependency instantiated inside a class constructor or function rather than injected  
+**Keywords**: class, __init__, constructor, new , Service(), Repository()  
+**Languages**: Python, TypeScript, JavaScript, Java, C#  
+
+When a class directly instantiates its dependencies (`self.service = EmailService()`)
+instead of receiving them as constructor parameters, it becomes impossible to test in
+isolation or swap implementations. Dependencies should be injected, not created internally.
+
+**Exceptions**:
+- Value objects and DTOs with no external dependencies
+- Framework-managed dependency injection containers (Spring, FastAPI Depends, Angular DI)
+- Simple dataclasses or configuration objects
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## ARCH-007: Feature Envy
+
+**Severity**: P2  
+**Pattern**: Method that accesses data of another class more than its own  
+**Keywords**: class, def, self., this.  
+**Languages**: All  
+
+A method that repeatedly accesses attributes or calls methods of another class
+(e.g., `order.customer.address.city`) is envying the other class's data. The logic
+usually belongs in the class being accessed. This pattern makes refactoring brittle —
+the caller breaks whenever the callee's structure changes.
+
+**Exceptions**:
+- Adapter/facade patterns explicitly designed to translate between interfaces
+- Read-only projection queries
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## ARCH-008: Implicit Service Coupling via Shared Database
+
+**Severity**: P1  
+**Pattern**: Two distinct services importing from each other's database models or tables directly  
+**Keywords**: from services., import models, cross-service, shared_db  
+**Languages**: All  
+
+In a service-oriented or microservice architecture, services should not share database
+tables or import each other's ORM models. Shared-database coupling makes independent
+deployment and scaling impossible and creates hidden coordination requirements.
+
+**Safe pattern**: Services communicate via APIs or events, not shared schema.
+
+**Exceptions**:
+- Monoliths intentionally structured around a single schema (must be documented)
+- Read replicas or reporting databases explicitly designed for cross-service reads
 
 ### User Feedback History
 _No entries yet._

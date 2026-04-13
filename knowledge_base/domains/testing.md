@@ -2,7 +2,7 @@
 
 **Owner**: q  
 **Review Cadence**: On every NEW DISCOVERY  
-**Last Updated**: 2026-04-12  
+**Last Updated**: 2026-04-13  
 **Health**: GREEN
 
 ---
@@ -82,6 +82,73 @@ details. This makes refactoring break tests even when behavior is unchanged.
 
 **Exceptions**:
 - Test utilities or fixtures that are intentionally internal (`conftest.py`, `test_helpers.py`)
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## TEST-005: No Assertion in Test
+
+**Severity**: P2  
+**Pattern**: Test function that calls code but makes no assertion  
+**Keywords**: def test_, it(, describe(, @Test  
+**Languages**: All  
+
+A test function that exercises code but contains no `assert`, `expect`, `assertEqual`,
+or `verify` call. The test will always pass regardless of what the code does — it
+provides false coverage confidence.
+
+**Exceptions**:
+- Tests that intentionally verify no exception is raised (must have a comment explaining this)
+- Smoke tests that check a process runs without checking output (must be in a clearly named `smoke_tests/` directory)
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## TEST-006: Test Contains Real Credentials or PII
+
+**Severity**: P0  
+**Pattern**: Real-looking email addresses, phone numbers, SSNs, or API keys in test fixtures  
+**Keywords**: @gmail.com, @yahoo.com, @hotmail.com, 555-, SSN, card_number  
+**Languages**: All  
+
+Test fixtures containing real-format PII (valid email domains, realistic phone numbers,
+social security numbers, real-looking API keys). Even in test data, real-format PII
+creates compliance risk, accidentally leaks into logs, and confuses production data
+audits.
+
+**Safe pattern**: Use clearly fake formats: `test@example.com`, `555-0100`, `xxx-xx-0000`
+
+**Exceptions**:
+- Example.com, example.org, example.net email addresses (RFC 2606 reserved)
+- Synthetic data generation libraries where fake-ness is guaranteed by the generator
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## TEST-007: Mocking What You Don't Own
+
+**Severity**: P2  
+**Pattern**: Tests that mock third-party library internals or standard library classes  
+**Keywords**: mock.patch, jest.mock, sinon.stub, MagicMock  
+**Languages**: Python, JavaScript, TypeScript  
+
+Tests that mock internal methods of third-party libraries (e.g., patching `requests.Session._send`)
+are testing implementation details of code you don't control. When the library updates,
+the mocks break even if your code is correct. Prefer mocking at the boundary your code
+controls — the function that calls the library, not inside it.
+
+**Safe pattern**: Mock the wrapper function in your own code, not the library internals.
+Use contract tests or recorded HTTP responses (VCR, responses library) for external services.
+
+**Exceptions**:
+- Standard library builtins that are genuinely the boundary (e.g., `open()` for file I/O tests)
+- Libraries your team owns and maintains
 
 ### User Feedback History
 _No entries yet._

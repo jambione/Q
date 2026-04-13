@@ -57,6 +57,12 @@ class TestExtractJson(unittest.TestCase):
         result = q_judge.extract_json('{"flagged": true, "severity":')
         self.assertEqual(result, {"flagged": False})
 
+    def test_confidence_and_fix_fields_pass_through(self):
+        raw = '{"flagged": true, "severity": "P1", "rule_id": "ERR-001", "message": "Silent catch.", "confidence": 0.92, "suggested_fix": "Log the exception."}'
+        result = q_judge.extract_json(raw)
+        self.assertEqual(result['confidence'], 0.92)
+        self.assertEqual(result['suggested_fix'], 'Log the exception.')
+
 
 class TestGetRelevantDomains(unittest.TestCase):
 
@@ -162,6 +168,71 @@ class TestFormatVerdictOutput(unittest.TestCase):
         verdict = {"flagged": True, "severity": "P1", "rule_id": "ERR-001", "message": "Silent exception catch."}
         output = q_judge.format_verdict_output("handler.py", verdict, "v-003")
         self.assertIn("Silent exception catch", output)
+
+    def test_verdict_shows_suggested_fix(self):
+        verdict = {
+            "flagged": True, "severity": "P0", "rule_id": "SEC-001",
+            "message": "Hardcoded credential.", "suggested_fix": "Use os.getenv('API_KEY')"
+        }
+        output = q_judge.format_verdict_output("auth.py", verdict, "v-001")
+        self.assertIn("os.getenv", output)
+
+
+class TestDeterministicPrecheck(unittest.TestCase):
+
+    def test_hardcoded_password_flagged(self):
+        diff = "+password = 'supersecret123'\n"
+        result = q_judge.deterministic_precheck(diff)
+        self.assertIsNotNone(result)
+        self.assertTrue(result['flagged'])
+        self.assertEqual(result['rule_id'], 'SEC-001')
+        self.assertEqual(result['severity'], 'P0')
+
+    def test_placeholder_password_not_flagged(self):
+        diff = "+password = 'YOUR_PASSWORD_HERE'\n"
+        result = q_judge.deterministic_precheck(diff)
+        self.assertIsNone(result)
+
+    def test_env_var_not_flagged(self):
+        diff = "+api_key = os.getenv('API_KEY')\n"
+        result = q_judge.deterministic_precheck(diff)
+        self.assertIsNone(result)
+
+    def test_verify_false_flagged(self):
+        diff = "+resp = requests.get(url, verify=False)\n"
+        result = q_judge.deterministic_precheck(diff)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['rule_id'], 'SEC-004')
+
+    def test_silent_catch_flagged(self):
+        diff = "+except Exception:\n+    pass\n"
+        result = q_judge.deterministic_precheck(diff)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['rule_id'], 'ERR-001')
+
+    def test_removed_lines_ignored(self):
+        # Only added lines (starting with +) should be checked
+        diff = "-password = 'supersecret'\n+password = os.getenv('PASSWORD')\n"
+        result = q_judge.deterministic_precheck(diff)
+        self.assertIsNone(result)
+
+    def test_empty_diff_returns_none(self):
+        result = q_judge.deterministic_precheck("")
+        self.assertIsNone(result)
+
+    def test_precheck_includes_suggested_fix(self):
+        diff = "+secret = 'abc123xyz'\n"
+        result = q_judge.deterministic_precheck(diff)
+        self.assertIsNotNone(result)
+        self.assertIn('suggested_fix', result)
+        self.assertIsInstance(result['suggested_fix'], str)
+        self.assertGreater(len(result['suggested_fix']), 5)
+
+    def test_precheck_confidence_is_1(self):
+        diff = "+token = 'ghp_realtoken123456'\n"
+        result = q_judge.deterministic_precheck(diff)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['confidence'], 1.0)
 
 
 if __name__ == "__main__":

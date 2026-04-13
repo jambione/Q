@@ -95,7 +95,9 @@ RESPONSE FORMAT — respond ONLY with valid JSON, no other text:
   "severity": "P0",
   "rule_id": "SEC-001",
   "message": "One sentence explanation for the developer.",
-  "kb_excerpt": "Exact rule text that triggered this flag."
+  "kb_excerpt": "Exact rule text that triggered this flag.",
+  "confidence": 0.95,
+  "suggested_fix": "One-line fix suggestion."
 }
 
 OR if nothing is wrong:
@@ -107,7 +109,19 @@ SEVERITY GUIDE:
 - P0: Critical — never merge (security, data loss, disabled safety controls)
 - P1: Significant risk — should fix before merge
 - P2: Code quality concern — worth fixing, not blocking
-- P3: Observation — log silently, never interrupt"""
+- P3: Observation — log silently, never interrupt
+
+CONFIDENCE: Include a "confidence" float (0.0–1.0) in every flagged verdict.
+- 0.9–1.0: clear, unambiguous violation
+- 0.7–0.89: likely violation, context supports it
+- 0.5–0.69: borderline — flag only if the pattern is present and no exception applies
+- Below 0.5: do not flag
+
+SUGGESTED FIX: Include a "suggested_fix" field with a one-line fix. Be specific — name the function, variable, or pattern to use. Examples:
+- SEC-001: "Move to environment variable: os.getenv('API_KEY')"
+- SEC-004: "Remove verify=False or add SSL certificate to trust store"
+- ERR-001: "Log the exception: except Exception as e: logger.error(e)"
+- PERF-001: "Batch query before loop: items = Model.objects.filter(id__in=ids)"""
 
 
 def build_user_prompt(file_path: str, diff_text: str, domain_docs: dict, learned: str) -> str:
@@ -330,7 +344,9 @@ def append_verdict(config: dict, verdict_id: str, file_path: str, verdict: dict)
     message = verdict.get("message", "—").replace("|", "/")  # Sanitize for markdown table
     outcome = "flagged" if verdict.get("flagged") else "clean"
 
-    row = f"| {date} | {verdict_id} | `{file_path}` | {rule_id} | {severity} | {message} | {outcome} | silent-hook |"
+    confidence = verdict.get("confidence", "—")
+    confidence_str = f"{confidence:.2f}" if isinstance(confidence, float) else str(confidence)
+    row = f"| {date} | {verdict_id} | `{file_path}` | {rule_id} | {severity} | {message} | {outcome} | silent-hook | {confidence_str} |"
 
     content = verdicts_path.read_text(encoding="utf-8")
     # Insert before the "_No verdicts yet._" placeholder or append after last row
@@ -370,7 +386,74 @@ def format_verdict_output(file_path: str, verdict: dict, verdict_id: str) -> str
         f"    Verdict ID: {verdict_id}",
         f"    Respond: [Q-ACCEPT] to confirm | [Q-OVERRIDE: reason] to dismiss",
     ]
+    if verdict.get("suggested_fix"):
+        lines.append(f"    Fix: {verdict['suggested_fix']}")
     return "\n".join(lines)
+
+
+# Regex patterns for obvious violations — checked before any API call
+_PRECHECK_PATTERNS = [
+    # SEC-001: hardcoded credential (variable name contains sensitive word, value is non-empty literal)
+    (
+        re.compile(
+            r'(?:password|api_key|apikey|secret|token|private_key|credential)\s*[=:]\s*["\'](?!YOUR_|<|xxx|changeme|test|fake|dummy|placeholder|\s*$)[^"\']{4,}["\']',
+            re.IGNORECASE
+        ),
+        "SEC-001", "P0",
+        "Hardcoded credential — move to environment variable: os.getenv('KEY')",
+    ),
+    # SEC-004: SSL verification disabled
+    (
+        re.compile(r'verify\s*=\s*False|rejectUnauthorized\s*:\s*false|ssl\._create_unverified_context', re.IGNORECASE),
+        "SEC-004", "P0",
+        "Remove verify=False or configure a proper CA certificate bundle",
+    ),
+    # SEC-005: world-writable permissions
+    (
+        re.compile(r'chmod\s+(?:0o?)?777|os\.chmod[^,\n]+(?:0o777|0777)', re.IGNORECASE),
+        "SEC-005", "P2",
+        "Use 0o644 for files or 0o755 for executables instead of 0o777",
+    ),
+    # ERR-001: silent exception catch (except Something: pass or except:\n    pass)
+    (
+        re.compile(r'except[^\n]*:\s*\n\s*pass\b', re.MULTILINE),
+        "ERR-001", "P1",
+        "Log the exception instead of passing silently: except Exception as e: logger.error(e)",
+    ),
+]
+
+
+def deterministic_precheck(diff_text: str) -> dict | None:
+    """Run regex-based pre-checks on diff added lines before calling the API.
+
+    Only inspects lines being added (starting with '+', not '+++').
+    Returns a verdict dict if a clear violation is found, None otherwise.
+    Deterministic pre-checks eliminate API calls for unambiguous P0/P1 patterns.
+    """
+    # Extract only added lines for analysis
+    added_lines = [
+        line[1:]  # strip leading '+'
+        for line in diff_text.splitlines()
+        if line.startswith('+') and not line.startswith('+++')
+    ]
+    if not added_lines:
+        return None
+
+    added_text = "\n".join(added_lines)
+
+    for pattern, rule_id, severity, suggested_fix in _PRECHECK_PATTERNS:
+        if pattern.search(added_text):
+            return {
+                "flagged": True,
+                "severity": severity,
+                "rule_id": rule_id,
+                "message": f"[deterministic] {suggested_fix}",
+                "suggested_fix": suggested_fix,
+                "confidence": 1.0,
+                "source": "precheck",
+            }
+
+    return None
 
 
 def judge_file(file_path: str, config: dict, api_key: str) -> dict:
@@ -393,6 +476,11 @@ def judge_file(file_path: str, config: dict, api_key: str) -> dict:
             + f"\n\n... ({len(diff_lines) - max_lines} lines omitted) ...\n\n"
             + "\n".join(diff_lines[-half:])
         )
+
+    # Deterministic pre-check: catch obvious violations without an API call
+    precheck = deterministic_precheck(diff)
+    if precheck is not None:
+        return precheck
 
     domain_docs = get_relevant_domains(diff, config["kb_path"])
     learned = load_learned(config)

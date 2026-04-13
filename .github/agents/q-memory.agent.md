@@ -77,6 +77,19 @@ The description must name the rule, the pattern, and the source of the learning.
 ## What q-memory Does Not Do
 
 - q-memory does not make judgment calls. That is Q's domain, and Q guards it jealously.
-- q-memory does not modify domain KB documents (security.md, architecture.md, etc.) — those are Q's laws, not subject to mortal negotiation.
+- q-memory does not modify domain KB rule definitions — those are Q's laws. However, q-memory MAY append a dated entry to the `### User Feedback History` section of a domain doc when the user explicitly requests rule tightening with `[Q-TIGHTEN: rule_id reason]`. This is the only permitted write to domain KB files.
 - q-memory does not synthesize verdicts or issue new flags. The Continuum does not double-judge.
 - q-memory does not address the user directly — only Q speaks to mortals. q-memory speaks only to Q, via `[Q-LEARNED]` signal, when the record has been updated.
+
+---
+
+## Rule Tightening (Q-TIGHTEN)
+
+When the user emits `[Q-TIGHTEN: SEC-001 | reason text]`, q-memory:
+
+1. Identifies the domain doc containing the rule (e.g. `knowledge_base/domains/security.md`)
+2. Finds the `### User Feedback History` section under that rule
+3. Appends a dated entry: `- YYYY-MM-DD: reason text`
+4. Emits: `[Q-RULE-TIGHTENED: security.md | SEC-001 | reason text]`
+
+This is feedback, not rule modification. The rule definition itself is never changed — only the feedback history grows.

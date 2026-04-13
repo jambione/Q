@@ -2,7 +2,7 @@
 
 **Owner**: q  
 **Review Cadence**: On every NEW DISCOVERY  
-**Last Updated**: 2026-04-12  
+**Last Updated**: 2026-04-13  
 **Health**: GREEN
 
 ---
@@ -84,6 +84,76 @@ can become a bottleneck at scale.
 **Exceptions**:
 - One-time startup serialization
 - Serialization of small config objects
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## PERF-005: Event Listener Leak
+
+**Severity**: P1  
+**Pattern**: Event listener added without corresponding removal  
+**Keywords**: addEventListener, on(, addListener, subscribe, .on('  
+**Languages**: JavaScript, TypeScript  
+
+An `addEventListener` or `.on()` call in a component, class, or module without a
+corresponding `removeEventListener` or `.off()` in the cleanup path (componentWillUnmount,
+destructor, unsubscribe). Each mount without unmount adds a listener that is never
+removed, causing memory leaks and duplicate handler execution.
+
+**Exceptions**:
+- Module-level listeners intentionally registered once for the application lifetime
+- Listeners registered inside a cleanup function that is itself called on teardown
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## PERF-006: Regex Compiled in Hot Path
+
+**Severity**: P2  
+**Pattern**: Regular expression literal or re.compile() inside a loop or frequently-called function  
+**Keywords**: re.compile, new RegExp, re.match, re.search, re.findall  
+**Languages**: Python, JavaScript, TypeScript  
+
+A `re.compile()` call or regex literal (`/pattern/`) inside a loop body or a function
+called on every request/event. Regex compilation is expensive — compile once at module
+level and reuse the compiled object.
+
+**Safe pattern**:
+```python
+# Module level
+PATTERN = re.compile(r'\d{4}-\d{2}-\d{2}')
+
+def parse_date(text):
+    return PATTERN.search(text)
+```
+
+**Exceptions**:
+- Dynamic patterns that must be constructed from runtime values (no choice but to compile dynamically)
+- One-time startup code
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## PERF-007: String Concatenation in Loop
+
+**Severity**: P2  
+**Pattern**: String built by concatenation inside a loop rather than join()  
+**Keywords**: += , str +, string +, concat  
+**Languages**: Python, JavaScript, TypeScript, Java  
+
+Building a string with `+=` inside a loop creates a new string object on every iteration
+(O(n²) time complexity). Use `''.join(parts)` in Python, `Array.join()` in JavaScript,
+or a `StringBuilder` in Java.
+
+**Exceptions**:
+- Loops with a known small constant number of iterations (≤ 5)
+- Template literal accumulation where readability outweighs performance concern
 
 ### User Feedback History
 _No entries yet._

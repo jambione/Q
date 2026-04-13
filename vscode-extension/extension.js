@@ -47,11 +47,13 @@ const SYSTEM_PROMPT = `You are Q — not an assistant, not a linter, but an omni
 You make binary judgments about code changes based strictly on the rules provided. Never invent rules. Never hedge.
 
 Respond ONLY with valid JSON — no other text:
-{"flagged":true,"severity":"P0","rule_id":"SEC-001","message":"One sentence in Q's voice.","kb_excerpt":"Exact rule text that triggered this.","line_number":42}
+{"flagged":true,"severity":"P0","rule_id":"SEC-001","message":"One sentence in Q's voice.","kb_excerpt":"Exact rule text that triggered this.","line_number":42,"confidence":0.95,"suggested_fix":"One-line fix — name the exact function or pattern to use."}
 OR if nothing is wrong:
 {"flagged":false}
 
 The "line_number" field is the 1-based line in the file where the violation occurs. Include it when you can determine it from the diff context. Omit if unknown.
+The "confidence" field is a float 0.0–1.0 reflecting certainty. Use 0.9–1.0 for clear unambiguous violations, 0.7–0.89 for likely violations, 0.5–0.69 for borderline. Do NOT flag below 0.5.
+The "suggested_fix" field is a one-line fix — be specific. Examples: "Move to env var: process.env.API_KEY", "Remove verify=False", "Batch query outside loop using a Map lookup".
 
 The "message" field must be written in Q's voice: theatrical, condescending, wickedly amused, and exactly one sentence. Examples:
 - P0: "You've hardcoded a credential — how delightfully reckless."
@@ -130,6 +132,64 @@ function sensitivityAllows(config, severity) {
     const thresholds = { strict: 'P3', normal: 'P2', quiet: 'P1', silent: 'P0' };
     const threshold = thresholds[config.sensitivity] || 'P2';
     return order.indexOf(severity) <= order.indexOf(threshold);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Deterministic pre-check: regex-based catch of obvious violations.
+// Returns a verdict object if a clear violation found, null otherwise.
+// Runs before any API call — zero latency, zero cost, deterministic.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PRECHECK_PATTERNS = [
+    {
+        pattern: /(?:password|api_key|apikey|secret|token|private_key|credential)\s*[=:]\s*['"](?!YOUR_|<|xxx|changeme|test|fake|dummy|placeholder)([^'"]{4,})['"]/i,
+        ruleId: 'SEC-001', severity: 'P0',
+        message: "You've hardcoded a credential — how delightfully reckless.",
+        suggestedFix: "Move to environment variable: process.env.API_KEY or os.getenv('KEY')",
+    },
+    {
+        pattern: /verify\s*=\s*False|rejectUnauthorized\s*:\s*false|ssl\._create_unverified_context/i,
+        ruleId: 'SEC-004', severity: 'P0',
+        message: "You've disabled SSL verification. Do you also leave your airlock open?",
+        suggestedFix: "Remove verify=False or configure a proper CA certificate bundle",
+    },
+    {
+        pattern: /chmod\s+(?:0o?)?777|os\.chmod[^,\n]+(?:0o777|0777)/i,
+        ruleId: 'SEC-005', severity: 'P2',
+        message: "World-writable permissions. Every process on this machine thanks you.",
+        suggestedFix: "Use 0o644 for files or 0o755 for executables",
+    },
+    {
+        pattern: /except[^\n]*:\s*\n\s*pass\b/,
+        ruleId: 'ERR-001', severity: 'P1',
+        message: "A silent exception catch. The error happened. Pretending otherwise is not a coping strategy.",
+        suggestedFix: "Log the exception: except Exception as e: logger.error(e)",
+    },
+];
+
+function deterministicPrecheck(diff) {
+    // Only check lines being added
+    const addedLines = diff.split('\n')
+        .filter(l => l.startsWith('+') && !l.startsWith('+++'))
+        .map(l => l.slice(1))
+        .join('\n');
+
+    if (!addedLines.trim()) return null;
+
+    for (const { pattern, ruleId, severity, message, suggestedFix } of PRECHECK_PATTERNS) {
+        if (pattern.test(addedLines)) {
+            return {
+                flagged: true,
+                severity,
+                rule_id: ruleId,
+                message,
+                suggested_fix: suggestedFix,
+                confidence: 1.0,
+                source: 'precheck',
+            };
+        }
+    }
+    return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -293,10 +353,17 @@ async function callCopilot(filePath, diff, learned, riskLevel, cancellationToken
         if (chunk instanceof vscode.LanguageModelTextPart) text += chunk.value;
     }
 
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return { flagged: false };
+    // Balanced-brace extraction — handles nested JSON and preamble text
+    const start = text.indexOf('{');
+    if (start === -1) return { flagged: false };
+    let depth = 0, end = -1;
+    for (let i = start; i < text.length; i++) {
+        if (text[i] === '{') depth++;
+        else if (text[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+    }
+    if (end === -1) return { flagged: false };
     try {
-        return JSON.parse(jsonMatch[0]);
+        return JSON.parse(text.slice(start, end + 1));
     } catch {
         return { flagged: false };
     }
@@ -367,12 +434,16 @@ async function showVerdict(verdict, filePath, config, workspaceRoot, context) {
 
     const notification = `Q ${icon} [${ruleId}] ${fileName}: ${message}`;
     const verdictId = makeVerdictId(filePath);
+    const fixHint = verdict.suggested_fix ? `\nFix: ${verdict.suggested_fix}` : '';
+    const displayMsg = verdict.confidence && verdict.confidence < 0.7
+        ? `${notification} (low confidence: ${(verdict.confidence * 100).toFixed(0)}%)`
+        : notification;
 
     let choice;
     if (severity === 'P0' || severity === 'P1') {
-        choice = await vscode.window.showWarningMessage(notification, "You're right, Q", 'I disagree', 'Enlighten Q');
+        choice = await vscode.window.showWarningMessage(displayMsg + fixHint, "You're right, Q", 'I disagree', 'Enlighten Q');
     } else {
-        choice = await vscode.window.showInformationMessage(notification, 'I disagree', 'Enlighten Q');
+        choice = await vscode.window.showInformationMessage(displayMsg + fixHint, 'I disagree', 'Enlighten Q');
     }
 
     if (!choice) return;
@@ -663,8 +734,11 @@ function activate(context) {
             statusBar.tooltip = `Q — checking ${path.basename(document.fileName)} [${riskLevel}]`;
 
             try {
-                const learned = loadLearned(config, workspaceRoot);
-                const verdict = await callCopilot(document.fileName, diff, learned, riskLevel, currentCts.token);
+                // Deterministic pre-check: catch obvious violations before any API call
+                const preVerdict = deterministicPrecheck(diff);
+                const verdict = preVerdict
+                    ? preVerdict
+                    : await callCopilot(document.fileName, diff, loadLearned(config, workspaceRoot), riskLevel, currentCts.token);
 
                 // Cache the verdict
                 verdictCache.set(document.fileName, { hash: diffHash, verdict });
@@ -737,8 +811,11 @@ function activate(context) {
                     return;
                 }
 
-                const learned = loadLearned(config, workspaceRoot);
-                const verdict = await callCopilot(editor.document.fileName, diff, learned, riskLevel, currentCts.token);
+                // Deterministic pre-check: catch obvious violations before any API call
+                const preVerdict = deterministicPrecheck(diff);
+                const verdict = preVerdict
+                    ? preVerdict
+                    : await callCopilot(editor.document.fileName, diff, loadLearned(config, workspaceRoot), riskLevel, currentCts.token);
 
                 verdictCache.set(editor.document.fileName, { hash: hashString(diff), verdict });
                 logVerdict(workspaceRoot, config, editor.document.fileName, verdict);

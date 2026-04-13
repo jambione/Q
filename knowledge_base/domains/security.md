@@ -2,7 +2,7 @@
 
 **Owner**: q  
 **Review Cadence**: On every NEW DISCOVERY  
-**Last Updated**: 2026-04-12  
+**Last Updated**: 2026-04-13  
 **Health**: GREEN
 
 ---
@@ -97,6 +97,96 @@ _No entries yet._
 
 File permission values of `777`, `0777`, or `0o777`. Acceptable values are `0o644` for
 files and `0o755` for executables.
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## SEC-006: Path Traversal Vulnerability
+
+**Severity**: P1  
+**Pattern**: User-controlled input used directly in file path construction  
+**Keywords**: open(, os.path.join, path.join, readFile, fs.open, __file__  
+**Languages**: Python, JavaScript, TypeScript, Go, Java  
+
+Any call to `open()`, `os.path.join()`, `path.join()`, or `fs.readFile()` where the
+path argument includes a variable that originates from user input (request params,
+form data, URL segments) without sanitization. Attackers can inject `../` sequences
+to access files outside the intended directory.
+
+**Safe pattern**: Resolve the path and verify it starts with the expected base directory:
+`resolved = os.path.realpath(user_path); assert resolved.startswith(BASE_DIR)`
+
+**Exceptions**:
+- Paths constructed entirely from constants or config values
+- Framework-managed static file serving (Flask send_from_directory, Express static)
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## SEC-007: Server-Side Request Forgery (SSRF)
+
+**Severity**: P1  
+**Pattern**: HTTP request made to a URL derived from user input  
+**Keywords**: requests.get, requests.post, fetch(, urllib, http.get, axios  
+**Languages**: Python, JavaScript, TypeScript, Go, Java  
+
+An outbound HTTP request where the URL includes a variable that could originate from
+user input. SSRF allows attackers to make the server issue requests to internal
+infrastructure (metadata services, internal APIs, localhost).
+
+**Safe pattern**: Validate the URL against an allowlist of permitted domains before making the request.
+
+**Exceptions**:
+- URLs constructed entirely from constants
+- Webhook callbacks where the URL is stored at registration time by an authenticated user and validated on storage
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## SEC-008: JWT Without Expiry
+
+**Severity**: P1  
+**Pattern**: JWT token created without an expiration claim  
+**Keywords**: jwt.encode, jwt.sign, JsonWebToken, PyJWT, token  
+**Languages**: Python, JavaScript, TypeScript, Java  
+
+A JWT token signed without an `exp` (expiration) claim. Tokens without expiry never
+become invalid — a leaked token grants permanent access. Always set `exp` to a short
+window appropriate for the token's use: 15 minutes for access tokens, longer for
+refresh tokens (which should be rotatable).
+
+**Exceptions**:
+- API keys intentionally designed as long-lived (must be documented and rotatable)
+- Internal service-to-service tokens with explicit justification
+
+### User Feedback History
+_No entries yet._
+
+---
+
+## SEC-009: Insecure Direct Object Reference (IDOR)
+
+**Severity**: P1  
+**Pattern**: Resource fetched by ID from user input without ownership check  
+**Keywords**: find_by_id, get_by_id, findById, objects.get, Model.get  
+**Languages**: All  
+
+A database lookup using an ID that comes from user input (URL params, request body)
+with no check that the requesting user owns or has permission to access that record.
+Attackers can enumerate IDs to access other users' data.
+
+**Safe pattern**: Always scope queries to the authenticated user:
+`obj = Model.objects.get(id=user_id, owner=request.user)`
+
+**Exceptions**:
+- Public resources genuinely accessible to all authenticated users
+- Admin endpoints with explicit role-check middleware documented above the handler
 
 ### User Feedback History
 _No entries yet._

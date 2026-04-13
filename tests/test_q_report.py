@@ -179,5 +179,75 @@ class TestBuildReport(unittest.TestCase):
         self.assertIn("P1", result)
 
 
+class TestDetectFlipFlops(unittest.TestCase):
+
+    def _make_row(self, file, rule, outcome, date="2026-04-10"):
+        return {"file": file, "rule": rule, "outcome": outcome, "date": date,
+                "severity": "P1", "message": "msg", "verdict_id": "v1", "mode": "hook"}
+
+    def test_no_rows_returns_empty(self):
+        self.assertEqual(q_report.detect_flip_flops([]), [])
+
+    def test_single_row_no_flip(self):
+        rows = [self._make_row("auth.py", "SEC-001", "flagged")]
+        self.assertEqual(q_report.detect_flip_flops(rows), [])
+
+    def test_consistent_flags_no_flip(self):
+        rows = [
+            self._make_row("auth.py", "SEC-001", "flagged", "2026-04-01"),
+            self._make_row("auth.py", "SEC-001", "flagged", "2026-04-02"),
+        ]
+        self.assertEqual(q_report.detect_flip_flops(rows), [])
+
+    def test_flagged_then_clean_is_flip(self):
+        rows = [
+            self._make_row("auth.py", "SEC-001", "flagged", "2026-04-01"),
+            self._make_row("auth.py", "SEC-001", "clean", "2026-04-02"),
+        ]
+        result = q_report.detect_flip_flops(rows)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["file"], "auth.py")
+        self.assertEqual(result[0]["rule"], "SEC-001")
+
+    def test_different_rules_treated_separately(self):
+        rows = [
+            self._make_row("auth.py", "SEC-001", "flagged", "2026-04-01"),
+            self._make_row("auth.py", "SEC-001", "clean", "2026-04-02"),
+            self._make_row("auth.py", "ERR-001", "flagged", "2026-04-01"),
+            self._make_row("auth.py", "ERR-001", "flagged", "2026-04-02"),
+        ]
+        result = q_report.detect_flip_flops(rows)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["rule"], "SEC-001")
+
+    def test_alternating_is_flip(self):
+        rows = [
+            self._make_row("f.py", "SEC-001", "flagged", "2026-04-01"),
+            self._make_row("f.py", "SEC-001", "clean", "2026-04-02"),
+            self._make_row("f.py", "SEC-001", "flagged", "2026-04-03"),
+        ]
+        result = q_report.detect_flip_flops(rows)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["count"], 3)
+
+
+class TestParseConfidence(unittest.TestCase):
+
+    def test_float_string(self):
+        self.assertAlmostEqual(q_report._parse_confidence("0.85"), 0.85)
+
+    def test_float_value(self):
+        self.assertAlmostEqual(q_report._parse_confidence(0.92), 0.92)
+
+    def test_dash_returns_none(self):
+        self.assertIsNone(q_report._parse_confidence("—"))
+
+    def test_none_returns_none(self):
+        self.assertIsNone(q_report._parse_confidence(None))
+
+    def test_invalid_string_returns_none(self):
+        self.assertIsNone(q_report._parse_confidence("not-a-number"))
+
+
 if __name__ == "__main__":
     unittest.main()
