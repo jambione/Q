@@ -133,6 +133,44 @@ def build_user_prompt(file_path: str, diff_text: str, domain_docs: dict, learned
     return "\n\n".join(parts)
 
 
+def extract_json(raw_text: str) -> dict:
+    """Parse a JSON verdict object from raw API response text.
+
+    Handles three cases:
+    1. Response is pure JSON — fast path via json.loads
+    2. Response has preamble/postamble text wrapping the JSON object
+    3. Response has nested JSON objects (balanced-brace walk)
+
+    Returns {"flagged": False} if no valid JSON object can be found.
+    """
+    raw_text = raw_text.strip()
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        pass
+
+    # Balanced-brace walk — handles preamble text and nested objects
+    start = raw_text.find("{")
+    if start != -1:
+        depth, end = 0, -1
+        for i, ch in enumerate(raw_text[start:], start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end != -1:
+            try:
+                return json.loads(raw_text[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+
+    print(f"[Q ERROR] Could not parse verdict JSON: {raw_text[:200]}", file=sys.stderr)
+    return {"flagged": False}
+
+
 def call_claude_api(system_prompt: str, user_prompt: str, model: str, api_key: str) -> dict:
     """Call Anthropic Messages API via urllib. Returns parsed JSON dict."""
     url = "https://api.anthropic.com/v1/messages"
@@ -206,29 +244,7 @@ def call_claude_api(system_prompt: str, user_prompt: str, model: str, api_key: s
         return {"flagged": False}
 
     raw_text = content[0]["text"].strip()
-
-    try:
-        return json.loads(raw_text)
-    except json.JSONDecodeError:
-        # Balanced-brace extraction — handles nested JSON the simple regex can't
-        start = raw_text.find("{")
-        if start != -1:
-            depth, end = 0, -1
-            for i, ch in enumerate(raw_text[start:], start):
-                if ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end = i
-                        break
-            if end != -1:
-                try:
-                    return json.loads(raw_text[start:end + 1])
-                except json.JSONDecodeError:
-                    pass
-        print(f"[Q ERROR] Could not parse verdict JSON: {raw_text[:200]}", file=sys.stderr)
-        return {"flagged": False}
+    return extract_json(raw_text)
 
 
 def get_file_diff(file_path: str) -> str:
